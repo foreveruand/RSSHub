@@ -9,8 +9,8 @@ export const route: Route = {
     features: {
         requireConfig: [
             {
-                name: 'AVBASE_SESSION',
-                description: 'AVBASE登陆后的session值，可在控制台的cookie下查找 `_jdb_session` 的值，即可获取',
+                name: 'AVBASE_COOKIES',
+                description: 'AVBASE登陆后的COOKIE',
                 optional: true,
             },
         ],

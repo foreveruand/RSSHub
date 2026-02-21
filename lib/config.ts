@@ -76,6 +76,7 @@ type ConfigEnvKeys =
     | 'FOLLOW_PRICE'
     | 'FOLLOW_USER_LIMIT'
     // Route-specific (dynamic cookies with prefixes)
+    | `AVBASE_COOKIES`
     | `BILIBILI_COOKIE_${string}`
     | 'BILIBILI_DM_IMG_LIST'
     | 'BILIBILI_DM_IMG_INTER'
@@ -342,6 +343,9 @@ export type Config = {
     };
 
     // Route-specific Configurations
+    avbase: {
+        cookies?: string;
+    };
     bilibili: {
         cookies: Record<string, string | undefined>;
         dmImgList?: string;
@@ -831,6 +835,9 @@ const calculateValue = () => {
         },
 
         // Route-specific Configurations
+        avbase: {
+            cookies: envs.AVBASE_COOKIES,
+        },
         bilibili: {
             cookies: bilibili_cookies,
             dmImgList: envs.BILIBILI_DM_IMG_LIST,
