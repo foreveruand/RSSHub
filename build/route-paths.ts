@@ -2244,6 +2244,7 @@ export type RoutePath =
   | `/pornhub/model/:username/:language?/:sort?`
   | `/pornhub/pornstar/:username/:language?/:sort?`
   | `/pornhub/search/:keyword`
+  | `/pornhub/search_url/:keyword/:language?`
   | `/pornhub/users/:username/:language?`
   | `/postman/release-notes`
   | `/priconne-redive/news/:server?`
