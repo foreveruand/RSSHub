@@ -2570,6 +2570,7 @@ export type RoutePath =
   | `/sourceforge/:routeParams?`
   | `/southcn/nfapp/column/:column?`
   | `/southcn/nfapp/reporter/:reporter`
+  | `/southplus/:category?`
   | `/spankbang/new_videos`
   | `/spglobal/ratings/:language?`
   | `/spotify/artist/:id`
