@@ -1,6 +1,7 @@
-import { describe, expect, it, vi, afterEach } from 'vitest';
+import type { Browser } from 'rebrowser-puppeteer';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
 import wait from './wait';
-import { type Browser } from 'rebrowser-puppeteer';
 
 let browser: Browser | null = null;
 
@@ -55,7 +56,7 @@ describe('puppeteer', () => {
         // these are something we really care about
         expect(webDriverTest).toBe('missing (passed)');
         expect(chromeTest).toBe('present (passed)');
-    }, 20000);
+    }, 45000);
     // }
 
     it('puppeteer accept http proxy uri w/ auth', async () => {

@@ -1,8 +1,9 @@
-import { Route, DataItem, Data } from '@/types';
-import ofetch from '@/utils/ofetch';
 import { load } from 'cheerio';
-import { parseDate } from '@/utils/parse-date';
+
+import type { Data, DataItem, Route } from '@/types';
 import cache from '@/utils/cache';
+import ofetch from '@/utils/ofetch';
+import { parseDate } from '@/utils/parse-date';
 
 const ROOT_URL = 'https://bfl.ai'; // 根 URL 定义为常量
 
@@ -54,7 +55,7 @@ async function handler(): Promise<Data> {
             const $timeElement = $anchor.find('time');
             const datetimeAttr = $timeElement.attr('datetime');
             const timeText = $timeElement.text().trim();
-            const pubDate = datetimeAttr ? parseDate(datetimeAttr) : (timeText ? parseDate(timeText) : undefined);
+            const pubDate = datetimeAttr ? parseDate(datetimeAttr) : timeText ? parseDate(timeText) : undefined;
 
             const summaryDescription = $anchor.find('p[class*="line-clamp-3"]').html()?.trim() || '';
             const author = 'Black Forest Labs';
