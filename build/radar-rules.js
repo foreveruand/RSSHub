@@ -3007,7 +3007,7 @@
     ".":[ { title:"演員",
         docs:"https://docs.rsshub.app/routes/multimedia",
         source:[ "/" ],
-        target:"/avbase/actors/:name/:filter?" } ] },
+        target:"/avbase/actors/:name" } ] },
   "azul.com":{ _name:"Azul",
     www:[ { title:"Downloads",
         docs:"https://docs.rsshub.app/routes/program-update",

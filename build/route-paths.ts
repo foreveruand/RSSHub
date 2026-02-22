@@ -236,7 +236,7 @@ export type RoutePath =
   | `/augmentcode/blog`
   | `/auto-stats/:category?`
   | `/autocentre/`
-  | `/avbase/actors/:name/:filter?`
+  | `/avbase/actors/:name`
   | `/azul/downloads`
   | `/azurlane/news/:server/:type?`
   | `/baai/hub/:tagId?/:sort?/:range?`

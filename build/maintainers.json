@@ -712,7 +712,7 @@
   "/autocentre/": [
     "driversti"
   ],
-  "/avbase/actors/:name/:filter?": [
+  "/avbase/actors/:name": [
     "cj"
   ],
   "/azul/downloads": [

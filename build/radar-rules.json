@@ -6295,7 +6295,7 @@
         "source": [
           "/"
         ],
-        "target": "/avbase/actors/:name/:filter?"
+        "target": "/avbase/actors/:name"
       }
     ]
   },
