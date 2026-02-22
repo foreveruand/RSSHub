@@ -1,4 +1,5 @@
 import type { Route } from '@/types';
+
 import utils from './utils';
 
 export const route: Route = {
@@ -9,13 +10,7 @@ export const route: Route = {
         category: '分类名（从各板块URL获取）',
     },
     features: {
-        requireConfig: [
-            {
-                name: 'SOUTHPLUS_COOKIE',
-                description: 'southplus_cookie用于访问部分帖子',
-                optional: true,
-            },
-        ],
+        requireConfig: false,
         requirePuppeteer: false,
         antiCrawler: true,
         supportBT: false,
@@ -31,7 +26,6 @@ export const route: Route = {
 };
 
 async function handler(ctx) {
-    const limit = Number(ctx.req.query('limit') ?? 20);
     const category = ctx.req.param('category') ?? '';
     const title = `South Plus - ${category || '全部'}`;
     return await utils.ProcessItems(ctx, category, title);

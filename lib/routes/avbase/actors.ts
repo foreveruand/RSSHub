@@ -1,11 +1,12 @@
-import { Route } from '@/types';
+import type { Route } from '@/types';
+
 import utils from './utils';
 
 export const route: Route = {
-    path: '/actors/:name/:filter?',
+    path: '/actors/:name',
     categories: ['multimedia'],
     example: '/avbase/actors/美乃すずめ',
-    parameters: { name: '演员名（日文）', filter: '过滤条件' },
+    parameters: { name: '演员名（日文）' },
     features: {
         requireConfig: [
             {
@@ -36,11 +37,7 @@ export const route: Route = {
 
 async function handler(ctx) {
     const name = ctx.req.param('name');
-    const filter = ctx.req.param('filter') ?? '';
-    const addonTags = ctx.req.query('addon_tags') ?? '';
-
     const currentUrl = `/talents/${name}`;
-
     const title = `AVBASE - ${name}`;
     return await utils.ProcessItems(ctx, currentUrl, title);
 }

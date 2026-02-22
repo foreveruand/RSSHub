@@ -1,21 +1,11 @@
-import got from '@/utils/got';
 import { load } from 'cheerio';
-import cache from '@/utils/cache';
-import config from '@/config';
 import { parseStringPromise } from 'xml2js';
 
-const RSS_URL = 'https://www.south-plus.net/rss.php';
-// const cookieJar = new CookieJar();
+import cache from '@/utils/cache';
+import got from '@/utils/got';
 
-// if (config.javdb.session) {
-//     const cookie = Cookie.fromJSON({
-//         key: '_jdb_session',
-//         value: config.javdb.session,
-//         domain,
-//         path: '/',
-//     });
-//     cookie && cookieJar.setCookie(cookie, rootUrl);
-// }
+const RSS_URL = 'https://www.south-plus.net/rss.php';
+
 function extractImages(desc: string): string[] {
     const regex = /\[img\](.*?)\[\/img\]/gi;
     const imgs: string[] = [];
@@ -28,8 +18,8 @@ function extractImages(desc: string): string[] {
 
 function cleanContent(desc: string): string {
     return desc
-        .replace(/\[img\].*?\[\/img\]/gi, '')
-        .replace(/\[\/?.*?\]/g, '')
+        .replaceAll(/\[img\].*?\[\/img\]/gi, '')
+        .replaceAll(/\[\/?.*?\]/g, '')
         .trim();
 }
 
@@ -38,10 +28,6 @@ async function fetchCoverFromPage(url: string): Promise<string> {
         const res = await got({
             method: 'get',
             url,
-            // cookieJar,
-            // headers: {
-            //     'User-Agent': config.trueUA,
-            // },
         });
         const $ = load(res.data);
         return $('img').first().attr('src') ?? '';
@@ -51,16 +37,10 @@ async function fetchCoverFromPage(url: string): Promise<string> {
 }
 
 export const ProcessItems = async (ctx, category?: string, title?: string) => {
-    const url = category
-    ? `${RSS_URL}?fid=${category}`
-    : RSS_URL;
+    const url = category ? `${RSS_URL}?fid=${category}` : RSS_URL;
     const response = await got({
         method: 'get',
-        url: url,
-        // cookieJar,
-        // headers: {
-        //     'User-Agent': config.trueUA,
-        // },
+        url,
     });
 
     const parsed = await parseStringPromise(response.data, { explicitArray: false });
@@ -87,7 +67,7 @@ export const ProcessItems = async (ctx, category?: string, title?: string) => {
             pubDate: item.pubdate,
             author: item.author,
             category: item.category,
-            _raw: raw,          // 后面 detail 用
+            _raw: raw, // 后面 detail 用
             _cover: cover,
             _screenshots: screenshots,
         };
