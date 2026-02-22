@@ -1,0 +1,97 @@
+name: Deploy to Server
+
+on:
+    workflow_run:
+        workflows: ['Build assets']
+        types:
+            - completed
+        branches:
+            - master
+
+jobs:
+    deploy:
+        if: ${{ github.event.workflow_run.conclusion == 'success' }}
+        runs-on: ubuntu-slim
+        name: Deploy to remote server
+        timeout-minutes: 10
+        steps:
+            - name: Checkout this repo
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+            # v6.0.2
+
+            - name: Download build assets artifact
+              uses: actions/download-artifact@fa0a91b85d4f404e444e00e005951372dc801d16
+              with:
+                  name: build-assets
+                  path: ./assets-build
+
+            - name: Check deploy secrets
+              id: check-deploy
+              env:
+                  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+                  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+                  DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+                  DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+              run: |
+                  if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_SSH_KEY" ] && \
+                      [ -n "$DEPLOY_PATH" ]; then
+                    echo "deploy_enabled=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "deploy_enabled=false" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Setup SSH key
+              if: steps.check-deploy.outputs.deploy_enabled == 'true'
+              run: |
+                  mkdir -p ~/.ssh
+                  echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+                  ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+            - name: Upload and deploy to server
+              if: steps.check-deploy.outputs.deploy_enabled == 'true'
+              env:
+                  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+                  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+                  DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+                  DEPLOY_BRANCH: ${{ secrets.DEPLOY_BRANCH || 'master' }}
+              run: |
+                  # Upload the build assets folder
+                  tar -czf assets-build.tar.gz -C ./assets-build build
+                  scp assets-build.tar.gz "$${DEPLOY_USER}@$${DEPLOY_HOST}:/tmp/assets-build.tar.gz"
+
+                  # Execute remote commands
+                  ssh $${DEPLOY_USER}@$${DEPLOY_HOST} << 'REMOTE_EOF'
+                  set -e
+
+                  DEPLOY_PATH="${DEPLOY_PATH}"
+                  DEPLOY_BRANCH="${DEPLOY_BRANCH}"
+
+                  echo "Deploying assets to ${DEPLOY_PATH} "
+                  echo "(branch: ${DEPLOY_BRANCH})"
+
+                  # Extract assets to temp location
+                  mkdir -p /tmp/rsshub-deploy
+                  tar -xzf /tmp/assets-build.tar.gz -C /tmp/rsshub-deploy
+
+                  # Pull latest code
+                  cd "${DEPLOY_PATH}"
+                  git fetch origin "${DEPLOY_BRANCH}"
+                  git checkout "${DEPLOY_BRANCH}"
+                  git pull origin "${DEPLOY_BRANCH}"
+
+                  # Update build assets
+                  rm -rf assets/build
+                  mv /tmp/rsshub-deploy/build assets/
+
+                  # Restart service
+                  systemctl restart rsshub
+
+                  # Cleanup
+                  rm -rf /tmp/rsshub-deploy /tmp/assets-build.tar.gz
+
+                  echo "Deployment completed successfully"
+                  REMOTE_EOF
+
+                  # Clean up local archive
+                  rm -f assets-build.tar.gz
