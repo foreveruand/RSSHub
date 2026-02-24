@@ -1872,6 +1872,12 @@
   "/collabo-cafe/tag/:tag": [
     "cokemine"
   ],
+  "/comic-fuz/magazine/:id": [
+    "xiaobailoves"
+  ],
+  "/comic-fuz/manga/:id": [
+    "xiaobailoves"
+  ],
   "/comicat/search/:keyword": [
     "Cyang39"
   ],
@@ -5222,6 +5228,9 @@
   ],
   "/lens/profile/:handle": [
     "DIYgod"
+  ],
+  "/lephoceen/chrono": [
+    "Loopy03"
   ],
   "/letterboxd/:username/watchlist": [
     "johan456789"
