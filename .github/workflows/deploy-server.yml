@@ -2,29 +2,35 @@ name: Deploy to Server
 
 on:
     workflow_dispatch:
-    workflow_run:
-        workflows: ['Build assets']
-        types:
-            - completed
+    push:
         branches:
             - master
+        paths:
+            - 'lib/**/*.ts'
+            - 'lib/**/*.tsx'
 
 jobs:
     deploy:
-        if: ${{ github.event.workflow_run.conclusion == 'success' }}
         runs-on: ubuntu-slim
         name: Deploy to remote server
-        timeout-minutes: 10
+        timeout-minutes: 30
         steps:
             - name: Checkout this repo
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-            # v6.0.2
 
-            - name: Download build assets artifact
-              uses: actions/download-artifact@fa0a91b85d4f404e444e00e005951372dc801d16
+            - name: Install pnpm
+              uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+            - name: Use Node.js Active LTS
+              uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
               with:
-                  name: build-assets
-                  path: ./assets-build
+                  node-version: lts/*
+                  cache: 'pnpm'
+
+            - name: Install dependencies
+              run: pnpm i
+
+            - name: Build assets
+              run: pnpm build
 
             - name: Check deploy secrets
               id: check-deploy
@@ -47,7 +53,12 @@ jobs:
                   mkdir -p ~/.ssh
                   echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
                   chmod 600 ~/.ssh/id_rsa
-                  ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+                  # Extract hostname (strip port if present)
+                  DEPLOY_HOST="${{ secrets.DEPLOY_HOST }}"
+                  DEPLOY_PORT="${{ secrets.DEPLOY_PORT || '22' }}"
+                  HOSTNAME="${DEPLOY_HOST%%:*}"
+                  echo "Adding known host for $HOSTNAME"
+                  ssh-keyscan -H "$HOSTNAME" -p "$DEPLOY_PORT" >> ~/.ssh/known_hosts
 
             - name: Upload and deploy to server
               if: steps.check-deploy.outputs.deploy_enabled == 'true'
@@ -56,19 +67,34 @@ jobs:
                   DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
                   DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
                   DEPLOY_BRANCH: ${{ secrets.DEPLOY_BRANCH || 'master' }}
+                  DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
               run: |
-                  # Upload the build assets folder
-                  tar -czf assets-build.tar.gz -C ./assets-build build
-                  scp assets-build.tar.gz "$${DEPLOY_USER}@$${DEPLOY_HOST}:/tmp/assets-build.tar.gz"
+                  # Verify assets/build exists
+                  if [ ! -d "./assets/build" ]; then
+                    echo "Error: ./assets/build directory not found. Build may have failed."
+                    exit 1
+                  fi
 
-                  # Execute remote commands
-                  ssh $${DEPLOY_USER}@$${DEPLOY_HOST} << 'REMOTE_EOF'
+                  # Parse hostname and port
+                  DEPLOY_PORT="${DEPLOY_PORT:-22}"
+                  HOSTNAME="${DEPLOY_HOST%%:*}"
+                  # If port is embedded in hostname, extract it
+                  if [[ "$DEPLOY_HOST" == *:* ]]; then
+                    EMBEDDED_PORT="${DEPLOY_HOST#*:}"
+                    DEPLOY_PORT="$EMBEDDED_PORT"
+                  fi
+
+                  echo "Deploying to $HOSTNAME:$DEPLOY_PORT"
+
+                  # Upload the build assets folder
+                  tar -czf assets-build.tar.gz -C ./assets build
+                  scp -P "$DEPLOY_PORT" assets-build.tar.gz "${DEPLOY_USER}@${HOSTNAME}:/tmp/assets-build.tar.gz"
+
+                  # Execute remote commands (注意：去掉 REMOTE_EOF 的单引号)
+                  ssh -p "$DEPLOY_PORT" "${DEPLOY_USER}@${HOSTNAME}" bash << REMOTE_EOF
                   set -e
 
-                  DEPLOY_PATH="${DEPLOY_PATH}"
-                  DEPLOY_BRANCH="${DEPLOY_BRANCH}"
-
-                  echo "Deploying assets to ${DEPLOY_PATH} "
+                  echo "Deploying assets to ${DEPLOY_PATH}"
                   echo "(branch: ${DEPLOY_BRANCH})"
 
                   # Extract assets to temp location
