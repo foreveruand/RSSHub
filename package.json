@@ -35,10 +35,11 @@
         "container-deploy": "npm run container-build && wrangler deploy --config wrangler-container.toml --containers-rollout=immediate",
         "dev": "cross-env NODE_ENV=dev NODE_OPTIONS='--max-http-header-size=32768' tsx watch --inspect --clear-screen=false lib/index.ts",
         "dev:cache": "cross-env NODE_ENV=production NODE_OPTIONS='--max-http-header-size=32768' tsx watch --clear-screen=false lib/index.ts",
-        "format": "eslint --cache --fix \"**/*.{ts,tsx,js,yml}\" --concurrency auto && oxfmt .",
-        "format:check": "eslint --cache \"**/*.{ts,tsx,js,yml}\" --concurrency auto && oxfmt . --check",
+        "eslint": "eslint --cache . --concurrency auto",
+        "format": "oxlint --type-aware --fix \"**/*.{ts,tsx,js,yml}\" && oxfmt .",
+        "format:check": "oxlint --type-aware \"**/*.{ts,tsx,js,yml}\" && oxfmt . --check",
         "format:staged": "lint-staged",
-        "lint": "eslint --cache . --concurrency auto",
+        "lint": "oxlint --type-aware .",
         "prepare": "husky || true",
         "prepublishOnly": "npm run build:lib",
         "profiling": "cross-env NODE_ENV=production tsx --prof lib/index.ts",
@@ -61,17 +62,17 @@
         "@hono/node-server": "1.19.9",
         "@hono/zod-openapi": "1.2.2",
         "@jocmp/mercury-parser": "3.0.3",
-        "@notionhq/client": "5.9.0",
+        "@notionhq/client": "5.11.0",
         "@opentelemetry/api": "1.9.0",
         "@opentelemetry/exporter-prometheus": "0.212.0",
         "@opentelemetry/exporter-trace-otlp-http": "0.212.0",
         "@opentelemetry/resources": "2.5.1",
         "@opentelemetry/sdk-metrics": "2.5.1",
         "@opentelemetry/sdk-trace-base": "2.5.1",
-        "@opentelemetry/semantic-conventions": "1.39.0",
+        "@opentelemetry/semantic-conventions": "1.40.0",
         "@rss3/sdk": "0.0.25",
-        "@scalar/hono-api-reference": "0.9.44",
-        "@sentry/node": "10.39.0",
+        "@scalar/hono-api-reference": "0.9.46",
+        "@sentry/node": "10.40.0",
         "aes-js": "3.1.2",
         "cheerio": "1.2.0",
         "city-timezones": "1.3.3",
@@ -88,7 +89,7 @@
         "google-play-scraper": "10.1.2",
         "googleapis": "171.4.0",
         "header-generator": "2.1.80",
-        "hono": "4.12.2",
+        "hono": "4.12.3",
         "html-to-text": "9.0.5",
         "http-cookie-agent": "7.0.3",
         "https-proxy-agent": "7.0.6",
@@ -143,11 +144,12 @@
     },
     "devDependencies": {
         "@bbob/types": "4.3.1",
-        "@cloudflare/containers": "0.1.0",
+        "@cloudflare/containers": "0.1.1",
         "@cloudflare/puppeteer": "1.0.6",
-        "@cloudflare/workers-types": "4.20260303.0",
+        "@cloudflare/workers-types": "4.20260305.0",
         "@eslint/eslintrc": "3.3.4",
         "@eslint/js": "10.0.1",
+        "@oxlint/plugins": "1.50.0",
         "@stylistic/eslint-plugin": "5.9.0",
         "@types/aes-js": "3.1.4",
         "@types/babel__preset-env": "7.10.0",
@@ -163,9 +165,9 @@
         "@types/mailparser": "3.4.6",
         "@types/markdown-it": "14.1.2",
         "@types/module-alias": "2.0.4",
-        "@types/node": "25.3.0",
+        "@types/node": "25.3.2",
         "@types/sanitize-html": "2.16.0",
-        "@types/supertest": "6.0.3",
+        "@types/supertest": "7.2.0",
         "@typescript-eslint/eslint-plugin": "8.56.1",
         "@typescript-eslint/parser": "8.56.1",
         "@vercel/nft": "1.3.2",
@@ -174,7 +176,6 @@
         "domhandler": "5.0.3",
         "eslint": "10.0.2",
         "eslint-nibble": "9.1.1",
-        "eslint-plugin-github": "6.0.0",
         "eslint-plugin-import-x": "4.16.1",
         "eslint-plugin-n": "17.24.0",
         "eslint-plugin-simple-import-sort": "12.1.1",
@@ -191,6 +192,8 @@
         "msw": "2.4.3",
         "node-network-devtools": "1.0.29",
         "oxfmt": "0.35.0",
+        "oxlint": "1.50.0",
+        "oxlint-tsgolint": "0.15.0",
         "remark-parse": "11.0.0",
         "supertest": "7.2.2",
         "tsdown": "0.20.3",
@@ -198,7 +201,7 @@
         "unified": "11.0.5",
         "vite-tsconfig-paths": "6.1.1",
         "vitest": "4.0.9",
-        "wrangler": "4.68.0",
+        "wrangler": "4.69.0",
         "yaml-eslint-parser": "2.0.0"
     },
     "lint-staged": {
@@ -206,6 +209,7 @@
             "oxfmt --no-error-on-unmatched-pattern"
         ],
         "*.{ts,tsx,js,yml}": [
+            "oxlint --type-aware --fix",
             "eslint --cache --fix --concurrency auto",
             "oxfmt --no-error-on-unmatched-pattern"
         ]
@@ -213,7 +217,7 @@
     "engines": {
         "node": "^22.20.0 || ^24"
     },
-    "packageManager": "pnpm@10.30.1+sha512.3590e550d5384caa39bd5c7c739f72270234b2f6059e13018f975c313b1eb9fefcc09714048765d4d9efe961382c312e624572c0420762bdc5d5940cdf9be73a",
+    "packageManager": "pnpm@10.30.3+sha512.c961d1e0a2d8e354ecaa5166b822516668b7f44cb5bd95122d590dd81922f606f5473b6d23ec4a5be05e7fcd18e8488d47d978bbe981872f1145d06e9a740017",
     "pnpm": {
         "onlyBuiltDependencies": [
             "bufferutil",
@@ -235,10 +239,6 @@
             "wrangler"
         ],
         "overrides": {
-            "array-includes": "npm:@nolyfill/array-includes@^1",
-            "array.prototype.findlastindex": "npm:@nolyfill/array.prototype.findlastindex@^1",
-            "array.prototype.flat": "npm:@nolyfill/array.prototype.flat@^1",
-            "array.prototype.flatmap": "npm:@nolyfill/array.prototype.flatmap@^1",
             "difflib": "https://codeload.github.com/postlight/difflib.js/tar.gz/32e8e38c7fcd935241b9baab71bb432fd9b166ed",
             "es-set-tostringtag": "npm:@nolyfill/es-set-tostringtag@^1",
             "google-play-scraper>got": "^14.6.4",
@@ -246,19 +246,12 @@
             "google-play-scraper>tough-cookie": "^6.0.0",
             "hasown": "npm:@nolyfill/hasown@^1",
             "is-core-module": "npm:@nolyfill/is-core-module@^1",
-            "object.assign": "npm:@nolyfill/object.assign@^1",
-            "object.fromentries": "npm:@nolyfill/object.fromentries@^1",
-            "object.groupby": "npm:@nolyfill/object.groupby@^1",
-            "object.values": "npm:@nolyfill/object.values@^1",
             "request>form-data": "^2.5.5",
             "rss-parser@3.13.0>entities": "^7.0.0",
             "rss-parser@3.13.0>xml2js": "^0.6.2",
             "safe-buffer": "npm:@nolyfill/safe-buffer@^1",
-            "safe-regex-test": "npm:@nolyfill/safe-regex-test@^1",
             "safer-buffer": "npm:@nolyfill/safer-buffer@^1",
-            "side-channel": "npm:@nolyfill/side-channel@^1",
-            "string.prototype.includes": "npm:@nolyfill/string.prototype.includes@^1",
-            "string.prototype.trimend": "npm:@nolyfill/string.prototype.trimend@^1"
+            "side-channel": "npm:@nolyfill/side-channel@^1"
         },
         "patchedDependencies": {
             "rss-parser@3.13.0": "patches/rss-parser@3.13.0.patch"
