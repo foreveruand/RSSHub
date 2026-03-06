@@ -5,9 +5,20 @@ import ConfigNotFoundError from '@/errors/types/config-not-found';
 import cache from '@/utils/cache';
 import logger from '@/utils/logger';
 import { parseDate } from '@/utils/parse-date';
-import puppeteer from '@/utils/puppeteer'; // 引入 Puppeteer
+import puppeteer from '@/utils/puppeteer';
 
 const allowDomain = new Set(['javdb.com', 'javdb36.com', 'javdb007.com', 'javdb521.com']);
+
+const setupPage = async (page) => {
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+            req.abort();
+        } else {
+            req.continue();
+        }
+    });
+};
 
 const ProcessItems = async (ctx, currentUrl, title) => {
     const domain = ctx.req.query('domain') ?? 'javdb.com';
@@ -20,15 +31,13 @@ const ProcessItems = async (ctx, currentUrl, title) => {
     const rootUrl = `https://${domain}`;
     const browser = await puppeteer();
 
-    let items = [];
-    let htmlTitle = '';
-
     try {
-        const page = await browser.newPage();
+        // 1. 列表页，用完立刻关闭
+        const listPage = await browser.newPage();
+        await setupPage(listPage);
 
-        // 1. 设置 Cookie (处理登录 Session)
         if (config.javdb.session) {
-            await page.setCookie({
+            await listPage.setCookie({
                 name: '_jdb_session',
                 value: config.javdb.session,
                 domain: url.hostname,
@@ -36,12 +45,12 @@ const ProcessItems = async (ctx, currentUrl, title) => {
             });
         }
 
-        // 2. 访问列表页
-        await page.goto(url.href, { waitUntil: 'domcontentloaded' });
-        const listHtml = await page.content();
-        const $ = load(listHtml);
-        htmlTitle = $('title').text();
+        await listPage.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const listHtml = await listPage.content();
+        await listPage.close();
 
+        const $ = load(listHtml);
+        const htmlTitle = $('title').text();
         $('.tags, .tag-can-play, .over18-modal').remove();
 
         const rawItems = $('div.item')
@@ -55,69 +64,96 @@ const ProcessItems = async (ctx, currentUrl, title) => {
                     pubDate: parseDate($item.find('.meta').text()),
                 };
             });
-        const CONCURRENCY = Number.parseInt(config.puppeteer_concurrency) || 2;
-        const processedItems = [];
 
-        // 将任务分块执行
-        for (let i = 0; i < rawItems.length; i += CONCURRENCY) {
-            const chunk = rawItems.slice(i, i + CONCURRENCY);
+        // 2. 缓存前置过滤，已缓存的条目不走浏览器
+        const needsDetail: typeof rawItems = [];
+        const cachedResults = await Promise.all(
+            rawItems.map(async (item) => {
+                try {
+                    const cached = await cache.get(item.link);
+                    if (cached) {
+                        return cached;
+                    }
+                } catch {
+                    // 缓存读取失败不影响主流程
+                }
+                needsDetail.push(item);
+                return null;
+            })
+        );
 
-            // eslint-disable-next-line no-await-in-loop
-            const chunkResults = await Promise.all(
-                chunk.map((item) =>
-                    cache.tryGet(item.link, async () => {
-                        const detailPage = await browser.newPage();
-                        try {
-                            // 增加随机延迟，模拟真实用户，进一步降低 403 风险
-                            await new Promise((r) => setTimeout(r, Math.random() * 1000));
+        // 3. 只对未缓存条目复用单个 detailPage 串行抓取
+        const detailMap = new Map();
 
-                            await detailPage.goto(item.link, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                            const detailHtml = await detailPage.content();
-                            const content = load(detailHtml);
+        if (needsDetail.length > 0) {
+            const detailPage = await browser.newPage();
+            await setupPage(detailPage);
 
-                            // 解析逻辑
-                            content('icon').remove();
-                            // ... (中间的 content 处理逻辑同上)
+            for (const item of needsDetail) {
+                try {
+                    // eslint-disable-next-line no-await-in-loop
+                    await detailPage.goto(item.link, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    // eslint-disable-next-line no-await-in-loop
+                    const detailHtml = await detailPage.content();
+                    const content = load(detailHtml);
 
-                            const enclosure_url = content('#magnets-content button[data-clipboard-text]').first().attr('data-clipboard-text');
-                            const category = content('.panel-block .value a')
-                                .toArray()
-                                .map((v) => content(v).text());
-                            const author = content('.panel-block .value').last().parent().find('.value a').first().text();
-                            const description =
-                                (content('.cover-container, .column-video-cover').html() || '') + (content('.movie-panel-info').html() || '') + (content('#magnets-content').html() || '') + (content('.preview-images').html() || '');
+                    content('icon').remove();
+                    content('#modal-review-watched, #modal-comment-warning, #modal-save-list').remove();
+                    content('.review-buttons, .copy-to-clipboard, .preview-video-container, .play-button').remove();
 
-                            return {
-                                ...item,
-                                enclosure_url,
-                                enclosure_type: 'application/x-bittorrent',
-                                category,
-                                author,
-                                description,
-                            };
-                        } catch (error) {
-                            logger.error(`Failed to fetch detail for ${item.link}: ${error.message}`);
-                            return item;
-                        } finally {
-                            await detailPage.close();
-                        }
-                    })
-                )
-            );
-            processedItems.push(...chunkResults);
+                    content('.preview-images img').each(function () {
+                        content(this).removeAttr('data-src');
+                        content(this).attr('src', content(this).parent().attr('href'));
+                    });
+
+                    const result = {
+                        ...item,
+                        enclosure_url: content('#magnets-content button[data-clipboard-text]').first().attr('data-clipboard-text'),
+                        enclosure_type: 'application/x-bittorrent',
+                        category: content('.panel-block .value a')
+                            .toArray()
+                            .map((v) => content(v).text()),
+                        author: content('.panel-block .value').last().parent().find('.value a').first().text(),
+                        description:
+                            (content('.cover-container, .column-video-cover').html() ?? '') + (content('.movie-panel-info').html() ?? '') + (content('#magnets-content').html() ?? '') + (content('.preview-images').html() ?? ''),
+                    };
+
+                    detailMap.set(item.link, result);
+                    // eslint-disable-next-line no-await-in-loop
+                    await cache.set(item.link, result, 60 * 60 * 24);
+                } catch (error) {
+                    if (error.name !== 'TimeoutError') {
+                        throw error;
+                    }
+                    logger.warn(`Timeout for ${item.link}, falling back to list data`);
+                    detailMap.set(item.link, null);
+                }
+            }
+
+            await detailPage.close();
         }
-        items = processedItems;
+
+        // 4. 组装最终结果
+        const processedItems = rawItems.map((item, index) => {
+            if (cachedResults[index]) {
+                return cachedResults[index];
+            }
+            const detail = detailMap.get(item.link);
+            if (!detail) {
+                return item; // 超时降级，只返回列表页信息
+            }
+            return detail;
+        });
+
+        const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
+        return {
+            title: subject === '' ? title : `${subject} - ${title}`,
+            link: url.href,
+            item: processedItems,
+        };
     } finally {
         await browser.close();
     }
-
-    const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
-
-    return {
-        title: subject === '' ? title : `${subject} - ${title}`,
-        link: url.href,
-        item: items,
-    };
 };
 
 export default { ProcessItems };

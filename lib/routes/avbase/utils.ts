@@ -3,8 +3,9 @@ import { load } from 'cheerio';
 import { config } from '@/config';
 import ConfigNotFoundError from '@/errors/types/config-not-found';
 import cache from '@/utils/cache';
+import logger from '@/utils/logger';
 import { parseDate } from '@/utils/parse-date';
-import puppeteer from '@/utils/puppeteer'; // 引入 Puppeteer 运行环境
+import puppeteer from '@/utils/puppeteer';
 
 const allowDomain = new Set(['avbase.net', 'www.avbase.net']);
 
@@ -17,37 +18,45 @@ const ProcessItems = async (ctx, currentUrl, title) => {
     }
 
     const rootUrl = `https://${domain}`;
-
-    // 1. 启动浏览器
     const browser = await puppeteer();
-    const page = await browser.newPage();
 
-    /* eslint-disable-next-line no-useless-assignment */
-    let items = [];
-    /* eslint-disable-next-line no-useless-assignment */
-    let htmlTitle = '';
+    // 资源拦截，开启一次，后续复用同一个 page 时持续生效
+    const setupPage = async (page) => {
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+    };
 
     try {
-        // 2. 访问列表页
-        // 设置 Cookie (如果配置中有)
-        if (config.avbase.cookies) {
+        // 1. 列表页
+        const listPage = await browser.newPage();
+        await setupPage(listPage);
+
+        if (config.avbase?.cookies) {
             const cookieArray = config.avbase.cookies.split(';').map((c) => {
-                const [name, value] = c.split('=');
-                return { name: name.trim(), value: value.trim(), domain: url.hostname };
+                const eqIndex = c.indexOf('=');
+                return {
+                    name: c.slice(0, eqIndex).trim(),
+                    value: c.slice(eqIndex + 1).trim(),
+                    domain: url.hostname,
+                };
             });
-            await page.setCookie(...cookieArray);
+            await listPage.setCookie(...cookieArray);
         }
 
-        // 模拟真实用户访问
-        await page.goto(url.href, {
-            waitUntil: 'domcontentloaded', // 或者 'networkidle2' 视情况而定
-        });
+        await listPage.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const listHtml = await listPage.content();
+        await listPage.close(); // 列表页用完立刻关闭
 
-        const responseData = await page.content();
-        const $ = load(responseData);
-        htmlTitle = $('title').text();
+        const $ = load(listHtml);
+        const htmlTitle = $('title').text();
 
-        items = $('div.relative')
+        const items = $('div.relative')
             .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 20)
             .toArray()
             .map((el) => {
@@ -65,110 +74,125 @@ const ProcessItems = async (ctx, currentUrl, title) => {
                 if (!titleText) {
                     return null;
                 }
-                return {
-                    title: `${id} - ${titleText}`,
-                    link,
-                    pubDate,
-                    author: actors.join(', '),
-                    enclosure_url: cover,
-                    enclosure_type: 'image/jpeg',
-                };
+                return { id, titleText, link, cover, pubDate, actors };
             })
             .filter(Boolean);
 
-        const CONCURRENCY = Number.parseInt(config.puppeteer_concurrency) || 2;
-        const processedItems = [];
+        // 2. 先过滤出未缓存的条目，已缓存的直接跳过，不走浏览器
+        const needsDetail: typeof items = [];
+        const cachedResults = await Promise.all(
+            items.map(async (item) => {
+                try {
+                    const cached = await cache.get(item.link);
+                    if (cached) {
+                        return cached;
+                    }
+                } catch {
+                    // 缓存读取失败不影响主流程
+                }
+                needsDetail.push(item);
+                return null;
+            })
+        );
 
-        // 将 items 按并发数分块处理
-        for (let i = 0; i < items.length; i += CONCURRENCY) {
-            const chunk = items.slice(i, i + CONCURRENCY);
+        // 3. 只对未缓存条目开一个 detailPage 复用，串行抓取
+        const detailMap = new Map();
 
-            // eslint-disable-next-line no-await-in-loop
-            const chunkResults = await Promise.all(
-                chunk.map((item) =>
-                    cache.tryGet(item.link, async () => {
-                        // 每个并发任务必须开启独立的标签页
-                        const detailPage = await browser.newPage();
-                        try {
-                            // 可选：增加微小的随机延迟，防止并发请求特征过于明显
-                            await new Promise((r) => setTimeout(r, Math.random() * 1000));
+        if (needsDetail.length > 0) {
+            const detailPage = await browser.newPage();
+            await setupPage(detailPage);
 
-                            await detailPage.goto(item.link, {
-                                waitUntil: 'domcontentloaded',
-                                timeout: 30000,
-                            });
+            for (const item of needsDetail) {
+                try {
+                    // eslint-disable-next-line no-await-in-loop
+                    await detailPage.goto(item.link, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    // eslint-disable-next-line no-await-in-loop
+                    const detailHtml = await detailPage.content();
+                    const content = load(detailHtml);
 
-                            const detailHtml = await detailPage.content();
-                            const content = load(detailHtml);
+                    const magnet = content('#magnets-content button[data-clipboard-text]').first().attr('data-clipboard-text');
+                    const releaseDate =
+                        content('.bg-base-100 .text-xs:contains("発売日")').next('.text-sm').text().trim() ||
+                        content('.bg-base-100 .text-xs')
+                            .filter((_, el) => content(el).text().includes('発売日'))
+                            .next('.text-sm')
+                            .text()
+                            .trim();
+                    const coverImg = content('.h-72 img').attr('src');
+                    const screenshots = content('.h-44 .flex-none a img')
+                        .toArray()
+                        .map((el) => content(el).attr('src'));
+                    const actorsList = content('.chip')
+                        .toArray()
+                        .map((el) => ({
+                            name: content(el).find('span').text().trim(),
+                            avatar: content(el).find('img').attr('src'),
+                        }));
+                    const tags = content('.flex.flex-wrap.gap-2 a')
+                        .toArray()
+                        .map((el) => content(el).text().trim());
 
-                            // --- 解析逻辑开始 ---
-                            const magnet = content('#magnets-content button[data-clipboard-text]').first().attr('data-clipboard-text');
+                    const result = {
+                        title: `${item.id} - ${item.titleText}`,
+                        link: item.link,
+                        pubDate: item.pubDate,
+                        author: item.actors.join(', '),
+                        enclosure_url: magnet,
+                        enclosure_type: 'application/x-bittorrent',
+                        description: `
+                            <div><strong>封面:</strong><br><img src="${coverImg}" style="max-width:300px;"></div>
+                            <div><strong>发售日:</strong> ${releaseDate}</div>
+                            <div><strong>剧照:</strong><br>${screenshots.map((src) => `<img src="${src}" style="max-width:120px;margin:2px;">`).join('')}</div>
+                            <div><strong>标签:</strong> ${tags.join(', ')}</div>
+                            <div><strong>演员:</strong> ${actorsList.map((a) => `<img src="${a.avatar}" alt="${a.name}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:4px;">${a.name}`).join(', ')}</div>
+                        `,
+                    };
 
-                            // 优化后的发售日获取逻辑
-                            const releaseDate =
-                                content('.bg-base-100 .text-xs:contains("発売日")').next('.text-sm').text().trim() ||
-                                content('.bg-base-100 .text-xs')
-                                    .filter((_, el) => content(el).text().includes('発売日'))
-                                    .next('.text-sm')
-                                    .text()
-                                    .trim();
+                    detailMap.set(item.link, result);
+                    // eslint-disable-next-line no-await-in-loop
+                    await cache.set(item.link, result, 60 * 60 * 24);
+                } catch (error) {
+                    if (error.name !== 'TimeoutError') {
+                        throw error;
+                    }
+                    logger.warn(`Timeout for ${item.link}, falling back to list data`);
+                    detailMap.set(item.link, null); // null 触发降级
+                }
+            }
 
-                            const coverImg = content('.h-72 img').attr('src');
-                            const screenshots = content('.h-44 .flex-none a img')
-                                .toArray()
-                                .map((el) => content(el).attr('src'));
-
-                            const actorsList = content('.chip')
-                                .toArray()
-                                .map((el) => ({
-                                    name: content(el).find('span').text().trim(),
-                                    avatar: content(el).find('img').attr('src'),
-                                }));
-
-                            const tags = content('.flex.flex-wrap.gap-2 a')
-                                .toArray()
-                                .map((el) => content(el).text().trim());
-
-                            item.enclosure_url = magnet;
-                            item.enclosure_type = 'application/x-bittorrent';
-                            item.description = `
-                                <div><strong>封面:</strong><br><img src="${coverImg}" style="max-width:300px;"></div>
-                                <div><strong>发售日:</strong> ${releaseDate}</div>
-                                <div><strong>剧照:</strong><br>${screenshots.map((src) => `<img src="${src}" style="max-width:120px;margin:2px;">`).join('')}</div>
-                                <div><strong>标签:</strong> ${tags.join(', ')}</div>
-                                <div><strong>演员:</strong> ${actorsList.map((a) => `<img src="${a.avatar}" alt="${a.name}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:4px;">${a.name}`).join(', ')}</div>
-                                ${content('.cover-container, .column-video-cover').html() || ''}
-                                ${content('.movie-panel-info').html() || ''}
-                                ${content('#magnets-content').html() || ''}
-                            `;
-                            // --- 解析逻辑结束 ---
-
-                            return item;
-                        } catch (error) {
-                            // 替换为 RSSHub 的 logger
-                            logger.error(`Error processing ${item.link}: ${error.message}`);
-                            return item;
-                        } finally {
-                            // 必须在 finally 中关闭当前标签页，防止内存泄漏
-                            await detailPage.close();
-                        }
-                    })
-                )
-            );
-            processedItems.push(...chunkResults);
+            await detailPage.close();
         }
 
-        items = processedItems;
-    } finally {
-        await browser.close(); // 4. 必须关闭浏览器，否则会导致内存泄漏
-    }
+        // 4. 组装最终结果
+        const processedItems = items.map((item, index) => {
+            if (cachedResults[index]) {
+                return cachedResults[index];
+            }
+            const detail = detailMap.get(item.link);
+            if (!detail) {
+                // 超时降级：只返回列表页信息
+                return {
+                    title: `${item.id} - ${item.titleText}`,
+                    link: item.link,
+                    pubDate: item.pubDate,
+                    author: item.actors.join(', '),
+                    enclosure_url: item.cover,
+                    enclosure_type: 'image/jpeg',
+                    description: `<div><strong>封面:</strong><br><img src="${item.cover}" style="max-width:300px;"></div>`,
+                };
+            }
+            return detail;
+        });
 
-    const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
-    return {
-        title: subject === '' ? title : `${subject} - ${title}`,
-        link: url.href,
-        item: items,
-    };
+        const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
+        return {
+            title: subject === '' ? title : `${subject} - ${title}`,
+            link: url.href,
+            item: processedItems,
+        };
+    } finally {
+        await browser.close();
+    }
 };
 
 export default { ProcessItems };
