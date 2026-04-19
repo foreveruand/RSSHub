@@ -54,7 +54,8 @@ const getUser = (url, cache) =>
                 const script = extractInitialState($);
                 const state = JSON.parse(script);
 
-                let { userPageData, notes } = state.user;
+                const userState = ensureValidUserState(state.user);
+                let { userPageData, notes } = userState;
                 userPageData = userPageData._rawValue || userPageData;
                 notes = notes._rawValue || notes;
 
@@ -67,41 +68,56 @@ const getUser = (url, cache) =>
                 onBeforeLoad: async (page) => {
                     await page.setRequestInterception(true);
                     page.on('request', (request) => {
-                        request.resourceType() === 'document' || request.resourceType() === 'script' || request.resourceType() === 'xhr' || request.resourceType() === 'other' ? request.continue() : request.abort();
+                        request.resourceType() === 'document' || request.resourceType() === 'script' || request.resourceType() === 'xhr' || request.resourceType() === 'fetch' || request.resourceType() === 'other'
+                            ? request.continue()
+                            : request.abort();
                     });
                 },
             });
             try {
                 let collect = '';
                 logger.http(`Requesting ${url}`);
-                await page.goto(url, {
-                    waitUntil: 'domcontentloaded',
+                await page.waitForSelector('body', { timeout: 10000 });
+
+                await page.waitForFunction(() => !!(window as any).__INITIAL_STATE__ || !!document.querySelector('#red-captcha'), {
+                    timeout: 15000,
                 });
-                await page.waitForSelector('div.reds-tab-item:nth-child(2), #red-captcha');
 
                 if (await page.$('#red-captcha')) {
                     throw new CaptchaError('小红书风控校验，请稍后再试');
                 }
 
                 const initialState = await page.evaluate(() => (window as any).__INITIAL_STATE__);
+                const initialSsrState = await page.evaluate(() => (window as any).__INITIAL_SSR_STATE__);
 
                 if (!(await page.$('.lock-icon'))) {
-                    await page.click('div.reds-tab-item:nth-child(2)');
-                    try {
-                        const response = await page.waitForResponse(
-                            (res) => {
-                                const req = res.request();
-                                return req.url().includes('/api/sns/web/v2/note/collect/page') && req.method() === 'GET' && req.resourceType() === 'xhr';
-                            },
-                            { timeout: 5000 }
-                        );
-                        collect = await response.json();
-                    } catch {
-                        //
+                    const collectTabClicked = await page.evaluate(() => {
+                        const tab = [...document.querySelectorAll<HTMLElement>('div.reds-tab-item')].find((element) => (element.textContent || '').includes('收藏'));
+                        if (tab) {
+                            tab.click();
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    if (collectTabClicked) {
+                        try {
+                            const response = await page.waitForResponse(
+                                (res) => {
+                                    const req = res.request();
+                                    return req.url().includes('/api/sns/web/v2/note/collect/page') && req.method() === 'GET' && (req.resourceType() === 'xhr' || req.resourceType() === 'fetch');
+                                },
+                                { timeout: 5000 }
+                            );
+                            collect = await response.json();
+                        } catch {
+                            //
+                        }
                     }
                 }
 
-                let { userPageData, notes } = initialState.user;
+                const userState = ensureValidUserState(await resolveUserState(page, initialState, initialSsrState));
+                let { userPageData, notes } = userState;
                 userPageData = userPageData._rawValue || userPageData;
                 notes = notes._rawValue || notes;
 
@@ -284,31 +300,36 @@ async function getUserWithCookie(url: string) {
     const cookie = config.xiaohongshu.cookie;
     const res = await fetchWithProxy(url, cookie);
     const $ = load(res);
-    const paths = $('#userPostedFeeds > section > div > a.cover.ld.mask').map((i, item) => item.attributes[3].value);
+    const paths = $('#userPostedFeeds a.cover')
+        .toArray()
+        .map((item) => item.attribs?.href);
     const script = extractInitialState($);
     const state = JSON.parse(script);
+    const userState = ensureValidUserState(state.user);
     let index = 0;
-    for (const item of state.user.notes.flat()) {
+    for (const item of userState.notes.flat()) {
         const path = paths[index];
         if (path && path.includes('?')) {
             item.id = item.id + path?.slice(path.indexOf('?'));
         }
         index = index + 1;
     }
-    return state.user;
+    return userState;
 }
 
 // Add helper function to extract initial state
 function extractInitialState($) {
-    let script = $('script')
-        .filter((i, script) => {
-            const text = script.children[0]?.data;
-            return text?.startsWith('window.__INITIAL_STATE__=');
-        })
-        .text();
-    script = script.slice('window.__INITIAL_STATE__='.length);
-    script = script.replaceAll('undefined', 'null');
-    return script;
+    const scriptText = $('script')
+        .toArray()
+        .map((script) => script.children[0]?.data || '')
+        .join('\n');
+    const match = scriptText.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*(?:;|$)/);
+
+    if (!match) {
+        throw new Error('Cannot extract __INITIAL_STATE__');
+    }
+
+    return match[1].replaceAll('undefined', 'null');
 }
 
 // Add helper function to extract initial SSR state
@@ -332,6 +353,45 @@ function extractInitialSsrState($) {
         return script;
     }
     throw new Error('Cannot extract __INITIAL_SSR_STATE__');
+}
+
+async function resolveUserState(page, initialState, initialSsrState) {
+    const userState = initialState?.user || initialSsrState?.user || initialSsrState?.Main?.user || initialSsrState?.main?.user || initialSsrState?.User?.user;
+
+    if (userState?.userPageData && userState?.notes) {
+        return userState;
+    }
+
+    const html = await page.content();
+    const $ = load(html);
+    const fallbackState: any = {};
+
+    try {
+        fallbackState.initial = JSON.parse(extractInitialState($));
+    } catch {
+        //
+    }
+
+    try {
+        fallbackState.ssr = JSON.parse(extractInitialSsrState($));
+    } catch {
+        //
+    }
+
+    const fallbackUserState = fallbackState.initial?.user || fallbackState.ssr?.user || fallbackState.ssr?.Main?.user || fallbackState.ssr?.main?.user || fallbackState.ssr?.User?.user;
+
+    if (fallbackUserState?.userPageData && fallbackUserState?.notes) {
+        return fallbackUserState;
+    }
+
+    throw new Error('Failed to parse user data from Xiaohongshu page. Try using cookie or proxy.');
+}
+
+function ensureValidUserState(userState) {
+    if (!userState?.userPageData?.basicInfo) {
+        throw new CaptchaError('小红书返回登录/验证页面，请使用有效 Cookie 或稍后再试');
+    }
+    return userState;
 }
 
 async function checkCookie() {

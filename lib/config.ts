@@ -66,6 +66,7 @@ type ConfigEnvKeys =
     | 'DISABLE_NSFW'
     | 'SUFFIX'
     | 'TITLE_LENGTH_LIMIT'
+    | 'PUPPETEER_CONCURRENCY'
     // OpenAI
     | 'OPENAI_API_KEY'
     | 'OPENAI_MODEL'
@@ -81,6 +82,7 @@ type ConfigEnvKeys =
     | 'FOLLOW_PRICE'
     | 'FOLLOW_USER_LIMIT'
     // Route-specific (dynamic cookies with prefixes)
+    | 'AVBASE_COOKIES'
     | `BILIBILI_COOKIE_${string}`
     | 'BILIBILI_DM_IMG_LIST'
     | 'BILIBILI_DM_IMG_INTER'
@@ -338,6 +340,7 @@ export type Config = {
     };
     suffix?: string;
     titleLengthLimit: number;
+    puppeteer_concurrency: number;
     openai: {
         apiKey?: string;
         model?: string;
@@ -356,6 +359,9 @@ export type Config = {
     };
 
     // Route-specific Configurations
+    avbase: {
+        cookies?: string;
+    };
     bilibili: {
         cookies: Record<string, string | undefined>;
         dmImgList?: string;
@@ -840,6 +846,7 @@ const calculateValue = () => {
         },
         suffix: envs.SUFFIX,
         titleLengthLimit: toInt(envs.TITLE_LENGTH_LIMIT, 150),
+        puppeteer_concurrency: toInt(envs.PUPPETEER_CONCURRENCY, 3),
         openai: {
             apiKey: envs.OPENAI_API_KEY,
             model: envs.OPENAI_MODEL || 'gpt-3.5-turbo-16k',
@@ -858,6 +865,9 @@ const calculateValue = () => {
         },
 
         // Route-specific Configurations
+        avbase: {
+            cookies: envs.AVBASE_COOKIES,
+        },
         bilibili: {
             cookies: bilibili_cookies,
             dmImgList: envs.BILIBILI_DM_IMG_LIST,

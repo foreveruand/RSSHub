@@ -1,6 +1,7 @@
 import querystring from 'node:querystring';
 
 import { config } from '@/config';
+import CaptchaError from '@/errors/types/captcha';
 import InvalidParameterError from '@/errors/types/invalid-parameter';
 import type { Route } from '@/types';
 import { ViewType } from '@/types';
@@ -77,7 +78,10 @@ async function handler(ctx) {
                 link: url,
                 item: notes,
             };
-        } catch {
+        } catch (error) {
+            if (error instanceof CaptchaError) {
+                throw error;
+            }
             // Fallback to normal logic if cookie method fails
             return await getUserFeeds(url, category);
         }
@@ -93,8 +97,9 @@ async function getUserFeeds(url: string, category: string) {
         collect,
     } = await getUser(url, cache);
 
-    const title = `${basicInfo.nickname} - 小红书${category === 'notes' ? '笔记' : '收藏'}`;
-    const description = `${basicInfo.desc} ${tags.map((t) => t.name).join(' ')} ${interactions.map((i) => `${i.count} ${i.name}`).join(' ')}`;
+    const nickname = basicInfo?.nickname || basicInfo?.nickName || basicInfo?.name || '小红书用户';
+    const title = `${nickname} - 小红书${category === 'notes' ? '笔记' : '收藏'}`;
+    const description = `${basicInfo?.desc || ''} ${(tags || []).map((t) => t.name).join(' ')} ${(interactions || []).map((i) => `${i.count} ${i.name}`).join(' ')}`.trim();
     const image = basicInfo.imageb || basicInfo.images;
 
     const renderNote = (notes) =>
@@ -104,7 +109,7 @@ async function getUserFeeds(url: string, category: string) {
                 link: new URL(noteCard.noteId || id, url).toString(),
                 guid: noteCard.displayTitle,
                 description: `<img src="${noteCard.cover.infoList.pop().url}" width="${noteCard.cover.width}" height="${noteCard.cover.height}"><br>${noteCard.displayTitle}`,
-                author: noteCard.user.nickname,
+                author: noteCard.user?.nickname || noteCard.user?.nickName || nickname,
                 upvotes: noteCard.interactInfo.likedCount,
             }))
         );
@@ -122,7 +127,7 @@ async function getUserFeeds(url: string, category: string) {
             title: item.display_title,
             link: `${url}/${item.note_id}`,
             description: `<img src ="${item.cover.info_list.pop().url}"><br>${item.display_title}`,
-            author: item.user.nickname,
+            author: item.user?.nickname || item.user?.nickName || nickname,
             upvotes: item.interact_info.likedCount,
         }));
     };

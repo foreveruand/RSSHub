@@ -1,0 +1,131 @@
+name: Deploy to Server
+
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - master
+        paths:
+            - 'lib/**/*.ts'
+            - 'lib/**/*.tsx'
+
+jobs:
+    deploy:
+        runs-on: ubuntu-slim
+        name: Deploy to remote server
+        timeout-minutes: 30
+        steps:
+            - name: Checkout this repo
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+            - name: Use Node.js Active LTS
+              uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238
+              with:
+                  node-version: lts/*
+                  cache: 'pnpm'
+
+            - name: Install dependencies
+              run: pnpm install --no-frozen-lockfile
+
+            - name: Build assets
+              run: pnpm build
+
+            - name: Check deploy secrets
+              id: check-deploy
+              env:
+                  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+                  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+                  DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+                  DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+              run: |
+                  if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_SSH_KEY" ] && \
+                      [ -n "$DEPLOY_PATH" ]; then
+                    echo "deploy_enabled=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "deploy_enabled=false" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Setup SSH key
+              if: steps.check-deploy.outputs.deploy_enabled == 'true'
+              run: |
+                  mkdir -p ~/.ssh
+                  echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+                  # Extract hostname (strip port if present)
+                  DEPLOY_HOST="${{ secrets.DEPLOY_HOST }}"
+                  DEPLOY_PORT="${{ secrets.DEPLOY_PORT || '22' }}"
+                  HOSTNAME="${DEPLOY_HOST%%:*}"
+                  echo "Adding known host for $HOSTNAME"
+                  ssh-keyscan -H "$HOSTNAME" -p "$DEPLOY_PORT" >> ~/.ssh/known_hosts
+
+            - name: Upload and deploy to server
+              if: steps.check-deploy.outputs.deploy_enabled == 'true'
+              env:
+                  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+                  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+                  DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+                  DEPLOY_BRANCH: ${{ secrets.DEPLOY_BRANCH || 'master' }}
+                  DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+              run: |
+                  # Verify build outputs exist
+                  if [ ! -d "./assets/build" ]; then
+                    echo "Error: ./assets/build directory not found. Build may have failed."
+                    exit 1
+                  fi
+                  if [ ! -d "./dist" ]; then
+                    echo "Error: ./dist directory not found. Build may have failed."
+                    exit 1
+                  fi
+
+                  # Parse hostname and port
+                  DEPLOY_PORT="${DEPLOY_PORT:-22}"
+                  HOSTNAME="${DEPLOY_HOST%%:*}"
+                  # If port is embedded in hostname, extract it
+                  if [[ "$DEPLOY_HOST" == *:* ]]; then
+                    EMBEDDED_PORT="${DEPLOY_HOST#*:}"
+                    DEPLOY_PORT="$EMBEDDED_PORT"
+                  fi
+
+                  echo "Deploying to $HOSTNAME:$DEPLOY_PORT"
+
+                  # Upload the build outputs
+                  tar -czf deploy-artifacts.tar.gz ./assets/build ./dist
+                  scp -P "$DEPLOY_PORT" deploy-artifacts.tar.gz "${DEPLOY_USER}@${HOSTNAME}:/tmp/deploy-artifacts.tar.gz"
+
+                  # Execute remote commands
+                  ssh -p "$DEPLOY_PORT" "${DEPLOY_USER}@${HOSTNAME}" bash << REMOTE_EOF
+                  set -e
+
+                  echo "Deploying build outputs to ${DEPLOY_PATH}"
+                  echo "(branch: ${DEPLOY_BRANCH})"
+
+                  # Extract uploaded build outputs
+                  mkdir -p /tmp/rsshub-deploy
+                  tar -xzf /tmp/deploy-artifacts.tar.gz -C /tmp/rsshub-deploy
+
+                  # Pull latest code
+                  cd "${DEPLOY_PATH}"
+                  npm i --legacy-peer-deps
+                  git fetch origin "${DEPLOY_BRANCH}"
+                  git checkout "${DEPLOY_BRANCH}"
+                  git reset --hard origin/"${DEPLOY_BRANCH}"
+
+                  # Update uploaded build outputs
+                  rm -rf assets/build
+                  rm -rf dist
+                  mv /tmp/rsshub-deploy/assets/build assets/
+                  mv /tmp/rsshub-deploy/dist ./
+
+                  # Restart service
+                  systemctl restart rsshub
+
+                  # Cleanup
+                  rm -rf /tmp/rsshub-deploy /tmp/deploy-artifacts.tar.gz
+
+                  echo "Deployment completed successfully"
+                  REMOTE_EOF
+
+                  # Clean up local archive
+                  rm -f deploy-artifacts.tar.gz
