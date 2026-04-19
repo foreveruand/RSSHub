@@ -33,7 +33,7 @@ jobs:
             - name: Build assets
               run: pnpm build
             - name: Deploy
-              uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+              uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e
               with:
                   github_token: ${{ secrets.GITHUB_TOKEN }}
                   publish_dir: ./assets
@@ -41,6 +41,14 @@ jobs:
                   user_email: '41898282+github-actions[bot]@users.noreply.github.com'
                   # prevent deleting build/test-full-routes.json which will break build:docs
                   keep_files: true
+
+            - name: Upload build assets artifact
+              if: always()
+              uses: actions/upload-artifact@26f96c528a0065faa39e0c38e9312b5500390a63
+              with:
+                  name: build-assets
+                  path: ./assets/build
+                  retention-days: 1
 
             # docs
             - name: Build docs
