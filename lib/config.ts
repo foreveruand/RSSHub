@@ -74,6 +74,7 @@ type ConfigEnvKeys =
     | 'SUFFIX'
     | 'TITLE_LENGTH_LIMIT'
     | 'FORMAT'
+    | 'PUPPETEER_CONCURRENCY'
     // OpenAI
     | 'OPENAI_API_KEY'
     | 'OPENAI_MODEL'
@@ -90,6 +91,7 @@ type ConfigEnvKeys =
     | 'FOLLOW_USER_LIMIT'
     // Route-specific (dynamic cookies with prefixes)
     | 'BAIDU_COOKIE'
+    | 'AVBASE_COOKIES'
     | `BILIBILI_COOKIE_${string}`
     | 'BILIBILI_DM_IMG_LIST'
     | 'BILIBILI_DM_IMG_INTER'
@@ -363,6 +365,7 @@ export type Config = {
     suffix?: string;
     titleLengthLimit: number;
     format: string;
+    puppeteer_concurrency: number;
     openai: {
         apiKey?: string;
         model?: string;
@@ -383,6 +386,9 @@ export type Config = {
     // Route-specific Configurations
     baidu: {
         cookie?: string;
+    };
+    avbase: {
+        cookies?: string;
     };
     bilibili: {
         cookies: Record<string, string | undefined>;
@@ -916,6 +922,7 @@ const calculateValue = () => {
         suffix: envs.SUFFIX,
         titleLengthLimit: toInt(envs.TITLE_LENGTH_LIMIT, 150),
         format: envs.FORMAT || 'rss',
+        puppeteer_concurrency: toInt(envs.PUPPETEER_CONCURRENCY, 3),
         openai: {
             apiKey: envs.OPENAI_API_KEY,
             model: envs.OPENAI_MODEL || 'gpt-3.5-turbo-16k',
@@ -936,6 +943,9 @@ const calculateValue = () => {
         // Route-specific Configurations
         baidu: {
             cookie: envs.BAIDU_COOKIE,
+        },
+        avbase: {
+            cookies: envs.AVBASE_COOKIES,
         },
         bilibili: {
             cookies: bilibili_cookies,
