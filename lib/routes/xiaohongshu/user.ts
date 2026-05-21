@@ -95,7 +95,7 @@ async function getUserFeeds(url: string, category: string) {
         userPageData: { basicInfo, interactions, tags },
         notes,
         collect,
-    } = await getUser(url, cache);
+    } = await getUser(url, cache, category === 'collect');
 
     const nickname = basicInfo?.nickname || basicInfo?.nickName || basicInfo?.name || '小红书用户';
     const title = `${nickname} - 小红书${category === 'notes' ? '笔记' : '收藏'}`;
