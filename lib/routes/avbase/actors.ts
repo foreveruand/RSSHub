@@ -15,7 +15,7 @@ export const route: Route = {
                 optional: true,
             },
         ],
-        requirePuppeteer: false,
+        requirePuppeteer: true,
         antiCrawler: true,
         supportBT: false,
         supportPodcast: false,
