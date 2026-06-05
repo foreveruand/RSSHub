@@ -34,6 +34,8 @@ function safeNamespaces(namespaces: NamespacesType): NamespacesType {
 
 let modules: Record<string, { route: Route } | { namespace: Namespace }> = {};
 
+const routeModulePattern = /^(?!.*\.(?:test|spec)\.tsx?$).*\.tsx?$/;
+
 type RoutesType = Record<
     string,
     Route & {
@@ -74,7 +76,7 @@ if (config.isPackage) {
         default:
             modules = (await directoryImport({
                 targetDirectoryPath: path.join(__dirname, './routes'),
-                importPattern: /\.tsx?$/,
+                importPattern: routeModulePattern,
             })) as typeof modules;
     }
 }

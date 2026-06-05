@@ -8,8 +8,8 @@ import proxy from './proxy';
 
 type SetCookieParam = Parameters<BrowserContext['addCookies']>[0][number];
 type Cookie = Awaited<ReturnType<BrowserContext['cookies']>>[number];
-type GotoOptions = Parameters<PlaywrightPage['goto']>[1] & {
-    waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'networkidle0' | 'networkidle2';
+type GotoOptions = Omit<NonNullable<Parameters<PlaywrightPage['goto']>[1]>, 'waitUntil'> & {
+    waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'networkidle0' | 'networkidle2' | 'commit';
 };
 
 type ProxyState = NonNullable<ReturnType<typeof proxy.getCurrentProxy>>;
@@ -31,6 +31,7 @@ type FinishedRequest = {
 type RequestHandler = (request: RouteRequest) => Promise<void> | void;
 type RequestFinishedHandler = (request: FinishedRequest) => Promise<void> | void;
 type HandledRouteRequest = RouteRequest & { handled: boolean };
+type BrowserCloseStrategy = 'context-and-browser' | 'context-only' | 'browser-only';
 
 export type Page = PlaywrightPage & {
     authenticate: (credentials: { password?: string; username?: string }) => Promise<void>;
@@ -220,33 +221,80 @@ const patchPage = (page: PlaywrightPage, context: BrowserContext): Page => {
     return compatPage;
 };
 
-const createCompatBrowser = async (browser: PlaywrightBrowser, contextOptions: BrowserContextOptions): Promise<Browser> => {
-    const context = await browser.newContext(contextOptions);
+const createCompatBrowser = (browser: PlaywrightBrowser, context: BrowserContext, closeStrategy: BrowserCloseStrategy): Browser => {
     const compatBrowser = browser as Browser;
     const originalClose = browser.close.bind(browser);
+    const createdPages = new Set<Page>();
 
-    compatBrowser.newPage = async () => patchPage(await context.newPage(), context);
+    compatBrowser.newPage = async () => {
+        const page = patchPage(await context.newPage(), context);
+        createdPages.add(page);
+        page.once('close', () => {
+            createdPages.delete(page);
+        });
+        return page;
+    };
     compatBrowser.setCookie = async (...cookies) => {
         await context.addCookies(cookies.map((cookie) => withDefaultCookiePath(cookie)));
     };
     compatBrowser.cookies = (urls) => context.cookies(urls);
     compatBrowser.userAgent = () => config.ua;
     compatBrowser.close = async (options) => {
-        try {
-            await context.close();
-        } catch {
-            // Ignore already-closed contexts.
+        if (closeStrategy === 'browser-only') {
+            await Promise.all(
+                [...createdPages].map(async (page) => {
+                    try {
+                        await page.close();
+                    } catch {
+                        // Ignore already-closed pages.
+                    }
+                })
+            );
         }
-        await originalClose(options);
+        if (closeStrategy !== 'browser-only') {
+            try {
+                await context.close();
+            } catch {
+                // Ignore already-closed contexts.
+            }
+        }
+        if (closeStrategy !== 'context-only') {
+            await originalClose(options);
+        }
     };
 
     return compatBrowser;
 };
 
+const createCompatBrowserWithNewContext = async (browser: PlaywrightBrowser, contextOptions: BrowserContextOptions): Promise<Browser> => createCompatBrowser(browser, await browser.newContext(contextOptions), 'context-and-browser');
+
+const createCompatBrowserWithDefaultContext = (browser: PlaywrightBrowser): Browser => {
+    const context = browser.contexts()[0];
+    if (!context) {
+        throw new Error('Cannot find default Playwright browser context from CDP endpoint');
+    }
+    return createCompatBrowser(browser, context, 'browser-only');
+};
+
 const launchBrowser = async (currentProxy?: ProxyState | null) => {
     const launchOptions = getLaunchOptions(currentProxy);
+    if (config.playwrightCDPEndpoint) {
+        const browser = await chromium.connectOverCDP(config.playwrightCDPEndpoint);
+        return createCompatBrowserWithDefaultContext(browser);
+    }
+    if (config.playwrightUserDataDir) {
+        const context = await chromium.launchPersistentContext(config.playwrightUserDataDir, {
+            ...launchOptions,
+            ...getContextOptions(),
+        });
+        const browser = context.browser();
+        if (!browser) {
+            throw new Error('Cannot find Playwright browser from persistent context');
+        }
+        return createCompatBrowser(browser, context, 'context-only');
+    }
     const browser = config.playwrightWSEndpoint ? await chromium.connect(getEndpointWithLaunchOptions(config.playwrightWSEndpoint, launchOptions)) : await chromium.launch(launchOptions);
-    return createCompatBrowser(browser, getContextOptions());
+    return createCompatBrowserWithNewContext(browser, getContextOptions());
 };
 
 const getEndpointWithLaunchOptions = (endpoint: string, launchOptions: LaunchOptions) => {

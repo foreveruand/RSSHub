@@ -1,5 +1,4 @@
 import { load } from 'cheerio';
-import pMap from 'p-map';
 
 import { config } from '@/config';
 import CaptchaError from '@/errors/types/captcha';
@@ -8,38 +7,12 @@ import logger from '@/utils/logger';
 import ofetch from '@/utils/ofetch';
 import { parseDate } from '@/utils/parse-date';
 import type { Page } from '@/utils/playwright';
-import { getPlaywrightPage } from '@/utils/playwright';
+import playwright, { getPlaywrightPage } from '@/utils/playwright';
 
 const xiaohongshuBrowserCloseTimeout = 90000;
 const xiaohongshuBrowserNavigationTimeout = 45000;
-const xiaohongshuNoteConcurrency = 2;
 const xiaohongshuAllowedResourceTypes = new Set(['document', 'script', 'xhr', 'fetch', 'other']);
-let xiaohongshuBrowserQueue = Promise.resolve();
-
-type XiaohongshuFulltextItem = {
-    noteCard: {
-        noteId: string;
-        user: {
-            nickName: string;
-        };
-    };
-    id: string;
-};
-
-type XiaohongshuFulltextResult = {
-    author: string;
-    description: string;
-    guid: string;
-    link: string;
-    pubDate: Date;
-    title: string;
-    updated: Date;
-};
-
-type XiaohongshuPageSession = {
-    destroy: () => Promise<void>;
-    page: Page;
-};
+const xiaohongshuPageStatusPollTimeout = 3000;
 
 // Common headers for requests
 const getHeaders = (cookie?: string) => ({
@@ -62,202 +35,6 @@ const getHeaders = (cookie?: string) => ({
     ...(cookie ? { Cookie: cookie } : {}),
 });
 
-async function applyCookie(page: Page, cookie: string) {
-    const cookies = cookie
-        .split(';')
-        .map((item) => item.trim())
-        .filter(Boolean)
-        .map((item) => {
-            const equalIndex = item.indexOf('=');
-            if (equalIndex <= 0) {
-                return;
-            }
-
-            return {
-                name: item.slice(0, equalIndex).trim(),
-                value: item.slice(equalIndex + 1).trim(),
-                domain: '.xiaohongshu.com',
-                path: '/',
-            };
-        })
-        .filter((item) => item !== undefined);
-
-    if (cookies.length > 0) {
-        await page.setCookie(...cookies);
-    }
-}
-
-async function withXiaohongshuBrowserGate<T>(task: () => Promise<T>) {
-    const previousTask = xiaohongshuBrowserQueue;
-    let releaseQueue: () => void;
-    xiaohongshuBrowserQueue = new Promise<void>((resolve) => {
-        releaseQueue = resolve;
-    });
-
-    await previousTask;
-
-    try {
-        return await task();
-    } finally {
-        releaseQueue!();
-    }
-}
-
-async function setupXiaohongshuPage(page: Page, cookie?: string) {
-    page.setDefaultNavigationTimeout(xiaohongshuBrowserNavigationTimeout);
-    page.setDefaultTimeout(xiaohongshuBrowserNavigationTimeout);
-    await page.setRequestInterception(true);
-    page.on('request', (request: any) => {
-        xiaohongshuAllowedResourceTypes.has(request.resourceType()) ? request.continue() : request.abort();
-    });
-
-    if (cookie) {
-        await applyCookie(page, cookie);
-    }
-}
-
-function isRetryableXiaohongshuError(error: unknown) {
-    if (error instanceof CaptchaError) {
-        return false;
-    }
-
-    return (
-        error instanceof Error &&
-        (error.message.includes('Execution context was destroyed') ||
-            error.message.includes('Target page, context or browser has been closed') ||
-            error.message.includes('frame was detached') ||
-            error.message.includes('net::ERR_ABORTED') ||
-            error.message.includes('Navigation failed because page was closed'))
-    );
-}
-
-async function runXiaohongshuPageSession<T>(url: string, runner: (page: Page) => Promise<T>, cookie?: string) {
-    let session: XiaohongshuPageSession | undefined;
-    try {
-        session = (await getPlaywrightPage(url, {
-            closeTimeout: xiaohongshuBrowserCloseTimeout,
-            gotoConfig: {
-                timeout: xiaohongshuBrowserNavigationTimeout,
-                waitUntil: 'domcontentloaded',
-            },
-            onBeforeLoad: async (page) => {
-                await setupXiaohongshuPage(page, cookie);
-            },
-        })) as unknown as XiaohongshuPageSession;
-        logger.http(`Requesting ${url}`);
-        return await runner(session.page);
-    } finally {
-        if (session) {
-            await session.destroy();
-        }
-    }
-}
-
-function withXiaohongshuPage<T>(url: string, runner: (page: Page) => Promise<T>, cookie?: string) {
-    return withXiaohongshuBrowserGate(async () => {
-        try {
-            return await runXiaohongshuPageSession(url, runner, cookie);
-        } catch (error) {
-            if (isRetryableXiaohongshuError(error)) {
-                logger.warn(`Retrying Xiaohongshu page request for ${url}: ${error instanceof Error ? error.message : error}`);
-                return runXiaohongshuPageSession(url, runner, cookie);
-            }
-            throw error;
-        }
-    });
-}
-
-async function waitForXiaohongshuUserState(page: Page) {
-    await page.waitForSelector('body', { timeout: 10000 });
-    await page.waitForFunction(() => !!(window as any).__INITIAL_STATE__ || !!(window as any).__INITIAL_SSR_STATE__ || !!document.querySelector('#red-captcha'), {
-        timeout: 15000,
-    });
-
-    if (await page.$('#red-captcha')) {
-        throw new CaptchaError('小红书风控校验，请稍后再试');
-    }
-}
-
-async function getXiaohongshuInitialStates(page: Page) {
-    const initialState = await page.evaluate(() => (window as any).__INITIAL_STATE__);
-    const initialSsrState = await page.evaluate(() => (window as any).__INITIAL_SSR_STATE__);
-    return { initialSsrState, initialState };
-}
-
-function hasCollectAccess(page: Page) {
-    return page.$('.lock-icon');
-}
-
-function hasCollectTab(page: Page) {
-    return page.evaluate(() => [...document.querySelectorAll<HTMLElement>('div.reds-tab-item')].some((element) => (element.textContent || '').includes('收藏')));
-}
-
-async function clickCollectTabAndGetResponse(page: Page) {
-    const response = await Promise.all([
-        page.waitForResponse(
-            (res) => {
-                const req = res.request();
-                return req.url().includes('/api/sns/web/v2/note/collect/page') && req.method() === 'GET' && (req.resourceType() === 'xhr' || req.resourceType() === 'fetch');
-            },
-            { timeout: 5000 }
-        ),
-        page.evaluate(() => {
-            const tab = [...document.querySelectorAll<HTMLElement>('div.reds-tab-item')].find((element) => (element.textContent || '').includes('收藏'));
-            tab?.click();
-        }),
-    ]);
-    return response[0].json();
-}
-
-function getUserStateFromParsedStates(initialState: any, initialSsrState: any) {
-    return initialState?.user || initialSsrState?.user || initialSsrState?.Main?.user || initialSsrState?.main?.user || initialSsrState?.User?.user;
-}
-
-function getUserStateFromHtml(html: string) {
-    const $ = load(html);
-    let initialState;
-    let initialSsrState;
-
-    try {
-        initialState = JSON.parse(extractInitialState($));
-    } catch {
-        // Ignore missing __INITIAL_STATE__ and continue with SSR state.
-    }
-
-    try {
-        initialSsrState = JSON.parse(extractInitialSsrState($));
-    } catch {
-        // Ignore missing __INITIAL_SSR_STATE__ and rely on the initial state when available.
-    }
-
-    const userState = getUserStateFromParsedStates(initialState, initialSsrState);
-
-    if (!userState?.userPageData || !userState?.notes) {
-        throw new Error('Failed to parse user data from Xiaohongshu page. Try using cookie or proxy.');
-    }
-
-    return { $, userState };
-}
-
-function normalizeUserState(userState: any) {
-    const validUserState = ensureValidUserState(userState);
-    let { userPageData, notes } = validUserState;
-    userPageData = userPageData._rawValue || userPageData;
-    notes = notes._rawValue || notes;
-    return { notes, userPageData };
-}
-
-function extractNoteQueryParamsFromPaths(paths: Array<string | undefined>, notes: XiaohongshuFulltextItem[][]) {
-    let index = 0;
-    for (const item of notes.flat()) {
-        const path = paths[index];
-        if (path && path.includes('?')) {
-            item.id += path.slice(path.indexOf('?'));
-        }
-        index += 1;
-    }
-}
-
 // Fetch HTML through proxy when configured
 async function fetchWithProxy(url: string, cookie?: string): Promise<string> {
     const proxy = config.xiaohongshu.proxy;
@@ -272,45 +49,164 @@ async function fetchWithProxy(url: string, cookie?: string): Promise<string> {
     });
 }
 
-const getUser = (url: string, cacheStorage: typeof cache, includeCollect = false) =>
-    cacheStorage.tryGet(
-        `${url}#${includeCollect ? 'collect' : 'notes'}`,
+async function setupXiaohongshuPage(page: Page) {
+    page.setDefaultNavigationTimeout(xiaohongshuBrowserNavigationTimeout);
+    page.setDefaultTimeout(xiaohongshuBrowserNavigationTimeout);
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+        xiaohongshuAllowedResourceTypes.has(request.resourceType()) ? request.continue() : request.abort();
+    });
+}
+
+async function waitForXiaohongshuUserPage(page: Page) {
+    await waitForXiaohongshuUserPageStatus(page, Date.now());
+}
+
+async function waitForXiaohongshuUserPageStatus(page: Page, startedAt: number): Promise<void> {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= xiaohongshuBrowserNavigationTimeout) {
+        throw new Error('Timed out waiting for Xiaohongshu user page data');
+    }
+
+    try {
+        const timeout = Math.min(xiaohongshuPageStatusPollTimeout, xiaohongshuBrowserNavigationTimeout - elapsed);
+        const statusHandle = await page.waitForFunction(
+            () => {
+                if (document.querySelector('#red-captcha')) {
+                    return 'captcha';
+                }
+
+                if (location.pathname.startsWith('/login') || location.pathname.startsWith('/website-login')) {
+                    return 'login';
+                }
+
+                if (!!(window as any).__INITIAL_STATE__?.user || !!(window as any).__INITIAL_SSR_STATE__?.user || document.querySelector('div.reds-tab-item')) {
+                    return 'ready';
+                }
+
+                return false;
+            },
+            undefined,
+            { timeout }
+        );
+        const status = await statusHandle.jsonValue();
+
+        if (status === 'captcha') {
+            throw new CaptchaError('小红书风控校验，请稍后再试');
+        }
+
+        if (status === 'login') {
+            throw new CaptchaError('小红书返回登录/错误页面，请确认 Playwright 连接的是已登录的小红书浏览器上下文');
+        }
+
+        if (status === 'ready') {
+            return;
+        }
+    } catch (error) {
+        if (error instanceof CaptchaError) {
+            throw error;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes('Execution context was destroyed') && !message.includes('Target page, context or browser has been closed') && !message.includes('frame was detached') && !message.includes('Timeout')) {
+            throw error;
+        }
+    }
+
+    return waitForXiaohongshuUserPageStatus(page, startedAt);
+}
+
+async function getXiaohongshuInitialState(page: Page) {
+    const initialState = await page.evaluate(() => (window as any).__INITIAL_STATE__);
+    if (initialState?.user) {
+        return initialState;
+    }
+
+    const html = await page.content();
+    const $ = load(html);
+    return JSON.parse(extractInitialState($));
+}
+
+function hasCollectTab(page: Page) {
+    return page.evaluate(() => [...document.querySelectorAll<HTMLElement>('div.reds-tab-item')].some((element) => (element.textContent || '').includes('收藏')));
+}
+
+async function clickCollectTab(page: Page) {
+    await page.evaluate(() => {
+        const tab = [...document.querySelectorAll<HTMLElement>('div.reds-tab-item')].find((element) => (element.textContent || '').includes('收藏'));
+        tab?.click();
+    });
+}
+
+const getUser = (url, cache) =>
+    cache.tryGet(
+        url,
         async () => {
             // Use proxy if configured
             if (config.xiaohongshu.proxy) {
                 const res = await fetchWithProxy(url);
-                const { userState } = getUserStateFromHtml(res);
-                const { userPageData, notes } = normalizeUserState(userState);
+                const $ = load(res);
+                const script = extractInitialState($);
+                const state = JSON.parse(script);
+
+                let { userPageData, notes } = state.user;
+                userPageData = userPageData._rawValue || userPageData;
+                notes = notes._rawValue || notes;
 
                 // Cannot get collect data without Playwright
                 return { userPageData, notes, collect: '' };
             }
 
-            return withXiaohongshuPage(url, async (page) => {
+            // Use Playwright
+            const { page, destroy } = await getPlaywrightPage(url, {
+                closeTimeout: xiaohongshuBrowserCloseTimeout,
+                noGoto: true,
+                onBeforeLoad: setupXiaohongshuPage,
+            });
+            try {
                 let collect = '';
-                await waitForXiaohongshuUserState(page);
+                logger.http(`Requesting ${url}`);
+                await page.goto(url, {
+                    timeout: xiaohongshuBrowserNavigationTimeout,
+                    waitUntil: 'domcontentloaded',
+                });
+                await waitForXiaohongshuUserPage(page);
 
-                const { initialState, initialSsrState } = await getXiaohongshuInitialStates(page);
-                const userState = await resolveUserState(page, initialState, initialSsrState);
-                const { userPageData, notes } = normalizeUserState(userState);
+                const initialState = await getXiaohongshuInitialState(page);
 
-                if (includeCollect && !(await hasCollectAccess(page)) && (await hasCollectTab(page))) {
+                if (!(await page.$('.lock-icon')) && (await hasCollectTab(page))) {
                     try {
-                        collect = await clickCollectTabAndGetResponse(page);
+                        const [response] = await Promise.all([
+                            page.waitForResponse(
+                                (res) => {
+                                    const req = res.request();
+                                    return req.url().includes('/api/sns/web/v2/note/collect/page') && req.method() === 'GET' && (req.resourceType() === 'xhr' || req.resourceType() === 'fetch');
+                                },
+                                { timeout: 5000 }
+                            ),
+                            clickCollectTab(page),
+                        ]);
+                        collect = await response.json();
                     } catch {
-                        // Ignore collect fetch failures and return the main notes feed.
+                        //
                     }
                 }
 
+                let { userPageData, notes } = initialState.user;
+                userPageData = userPageData._rawValue || userPageData;
+                notes = notes._rawValue || notes;
+
                 return { userPageData, notes, collect };
-            });
+            } finally {
+                await destroy();
+            }
         },
         config.cache.routeExpire,
         false
     );
 
-const getBoard = (url: string, cacheStorage: typeof cache) =>
-    cacheStorage.tryGet(
+const getBoard = (url, cache) =>
+    cache.tryGet(
         url,
         async () => {
             // Use proxy if configured
@@ -322,32 +218,35 @@ const getBoard = (url: string, cacheStorage: typeof cache) =>
                 return state.Main;
             }
 
-            return withXiaohongshuPage(url, async (page) => {
-                await page.waitForSelector('body', { timeout: 10000 });
-                await page.waitForFunction(() => !!(window as any).__INITIAL_SSR_STATE__ || !!document.querySelector('#red-captcha'), {
-                    timeout: 15000,
+            // Use Playwright
+            const browser = await playwright();
+            try {
+                const page = await browser.newPage();
+                await page.setRequestInterception(true);
+                page.on('request', (request) => {
+                    request.resourceType() === 'document' || request.resourceType() === 'script' || request.resourceType() === 'xhr' ? request.continue() : request.abort();
                 });
-
-                if (await page.$('#red-captcha')) {
-                    throw new CaptchaError('小红书风控校验，请稍后再试');
-                }
-
+                logger.http(`Requesting ${url}`);
+                await page.goto(url);
+                await page.waitForSelector('.pc-container');
                 const initialSsrState = await page.evaluate(() => (window as any).__INITIAL_SSR_STATE__);
                 return initialSsrState.Main;
-            });
+            } finally {
+                await browser.close();
+            }
         },
         config.cache.routeExpire,
         false
     );
 
-const formatText = (text: string) => text.replaceAll(/(\r\n|\r|\n)/g, '<br>').replaceAll('\t', '&emsp;');
+const formatText = (text) => text.replaceAll(/(\r\n|\r|\n)/g, '<br>').replaceAll('\t', '&emsp;');
 
 // tag_list.id has nothing to do with its url
-const formatTagList = (tagList: Array<{ name: string }>) => tagList.reduce((acc, item) => acc + `#${item.name} `, '');
+const formatTagList = (tagList) => tagList.reduce((acc, item) => acc + `#${item.name} `, '');
 
-const formatImageList = (imageList: Array<{ url: string }>) => imageList.reduce((acc, item) => acc + `<img src="${item.url}"><br>`, '');
+const formatImageList = (imageList) => imageList.reduce((acc, item) => acc + `<img src="${item.url}"><br>`, '');
 
-const formatNote = (url: string, note: any) => ({
+const formatNote = (url, note) => ({
     title: note.title,
     link: url + '/' + note.noteId,
     description: formatText(note.desc) + '<br><br>' + formatTagList(note.tagList) + '<br><br>' + formatImageList(note.imageList),
@@ -356,11 +255,18 @@ const formatNote = (url: string, note: any) => ({
     updated: parseDate(note.lastUpdateTime, 'x'),
 });
 
-function renderNotesFulltext(notes: XiaohongshuFulltextItem[][], urlPrex: string, displayLivePhoto: boolean): Promise<XiaohongshuFulltextResult[]> {
-    const flattenedNotes: XiaohongshuFulltextItem[] = notes.flatMap((note) => note.map(({ noteCard, id }) => ({ id, noteCard })));
-    return pMap(
-        flattenedNotes,
-        async ({ noteCard, id }) => {
+async function renderNotesFulltext(notes, urlPrex, displayLivePhoto) {
+    const data: Array<{
+        title: string;
+        link: string;
+        description: string;
+        author: string;
+        guid: string;
+        pubDate: Date;
+        updated: Date;
+    }> = [];
+    const promises = notes.flatMap((note) =>
+        note.map(async ({ noteCard, id }) => {
             const link = `${urlPrex}/${id}`;
             const guid = `${urlPrex}/${noteCard.noteId}`;
             const { title, description, pubDate, updated } = await getFullNote(link, displayLivePhoto);
@@ -373,13 +279,14 @@ function renderNotesFulltext(notes: XiaohongshuFulltextItem[][], urlPrex: string
                 pubDate,
                 updated,
             };
-        },
-        { concurrency: xiaohongshuNoteConcurrency }
+        })
     );
+    data.push(...(await Promise.all(promises)));
+    return data;
 }
 
-async function getFullNote(link: string, displayLivePhoto: boolean) {
-    const data = await cache.tryGet<{ title: string; description: string; pubDate: Date; updated: Date }>(link, async () => {
+async function getFullNote(link, displayLivePhoto) {
+    const data = (await cache.tryGet(link, async () => {
         const res = await fetchWithProxy(link, config.xiaohongshu.cookie);
         const $ = load(res);
         const script = extractInitialState($);
@@ -425,7 +332,7 @@ async function getFullNote(link: string, displayLivePhoto: boolean) {
             }
         } else {
             mediaContent = note.imageList
-                .map((image: any) => {
+                .map((image) => {
                     if (image.livePhoto && displayLivePhoto) {
                         const videoUrls: string[] = [];
 
@@ -460,55 +367,45 @@ async function getFullNote(link: string, displayLivePhoto: boolean) {
             pubDate,
             updated,
         };
-    });
+    })) as Promise<{ title: string; description: string; pubDate: Date; updated: Date }>;
     return data;
 }
 
-function getUserWithCookie(url: string) {
+async function getUserWithCookie(url: string) {
     const cookie = config.xiaohongshu.cookie;
-
-    return cache.tryGet(
-        `${url}#cookie`,
-        () =>
-            withXiaohongshuPage(
-                url,
-                async (page) => {
-                    await waitForXiaohongshuUserState(page);
-
-                    const { initialState, initialSsrState } = await getXiaohongshuInitialStates(page);
-                    const userState = await resolveUserState(page, initialState, initialSsrState);
-                    const normalizedUserState = normalizeUserState(userState);
-                    const notePaths = await page.evaluate(() => [...document.querySelectorAll<HTMLAnchorElement>('#userPostedFeeds a.cover')].map((item) => item.getAttribute('href') ?? undefined));
-                    extractNoteQueryParamsFromPaths(notePaths, normalizedUserState.notes);
-
-                    return normalizedUserState;
-                },
-                cookie
-            ),
-        config.cache.routeExpire,
-        false
-    );
+    const res = await fetchWithProxy(url, cookie);
+    const $ = load(res);
+    const paths = $('#userPostedFeeds > section > div > a.cover.ld.mask').map((i, item) => item.attributes[3].value);
+    const script = extractInitialState($);
+    const state = JSON.parse(script);
+    let index = 0;
+    for (const item of state.user.notes.flat()) {
+        const path = paths[index];
+        if (path && path.includes('?')) {
+            item.id = item.id + path?.slice(path.indexOf('?'));
+        }
+        index = index + 1;
+    }
+    return state.user;
 }
 
 // Add helper function to extract initial state
-function extractInitialState($: any) {
-    const scriptText = $('script')
-        .toArray()
-        .map((script: any) => script.children[0]?.data || '')
-        .join('\n');
-    const match = scriptText.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*(?:;|$)/);
-
-    if (!match) {
-        throw new Error('Cannot extract __INITIAL_STATE__');
-    }
-
-    return match[1].replaceAll('undefined', 'null');
+function extractInitialState($) {
+    let script = $('script')
+        .filter((i, script) => {
+            const text = script.children[0]?.data;
+            return text?.startsWith('window.__INITIAL_STATE__=');
+        })
+        .text();
+    script = script.slice('window.__INITIAL_STATE__='.length);
+    script = script.replaceAll('undefined', 'null');
+    return script;
 }
 
 // Add helper function to extract initial SSR state
-function extractInitialSsrState($: any) {
+function extractInitialSsrState($) {
     let script = $('script')
-        .filter((_: any, script: any) => {
+        .filter((i, script) => {
             const text = script.children[0]?.data;
             return text?.includes('window.__INITIAL_SSR_STATE__=');
         })
@@ -526,30 +423,6 @@ function extractInitialSsrState($: any) {
         return script;
     }
     throw new Error('Cannot extract __INITIAL_SSR_STATE__');
-}
-
-async function resolveUserState(page: Page, initialState: any, initialSsrState: any) {
-    const userState = getUserStateFromParsedStates(initialState, initialSsrState);
-
-    if (userState?.userPageData && userState?.notes) {
-        return userState;
-    }
-
-    const html = await page.content();
-    const { userState: fallbackUserState } = getUserStateFromHtml(html);
-
-    if (fallbackUserState?.userPageData && fallbackUserState?.notes) {
-        return fallbackUserState;
-    }
-
-    throw new Error('Failed to parse user data from Xiaohongshu page. Try using cookie or proxy.');
-}
-
-function ensureValidUserState(userState: any) {
-    if (!userState?.userPageData?.basicInfo) {
-        throw new CaptchaError('小红书返回登录/验证页面，请使用有效 Cookie 或稍后再试');
-    }
-    return userState;
 }
 
 async function checkCookie() {

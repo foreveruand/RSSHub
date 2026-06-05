@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 const connect = vi.fn();
 const connectOverCDP = vi.fn();
 const launch = vi.fn();
+const launchPersistentContext = vi.fn();
 
 const routeContinue = vi.fn();
 const routeAbort = vi.fn();
@@ -24,8 +25,10 @@ let browser: any;
 const createBrowserMocks = () => {
     page = {
         context: vi.fn(),
+        close: vi.fn(),
         goto: vi.fn(),
         on: vi.fn(),
+        once: vi.fn(),
         route: vi.fn(),
         setExtraHTTPHeaders: vi.fn(),
         unroute: vi.fn(),
@@ -33,6 +36,7 @@ const createBrowserMocks = () => {
 
     context = {
         addCookies: vi.fn(),
+        browser: vi.fn(() => browser),
         close: vi.fn(() => Promise.resolve()),
         cookies: vi.fn(),
         newPage: vi.fn(() => Promise.resolve(page)),
@@ -40,6 +44,7 @@ const createBrowserMocks = () => {
 
     browser = {
         close: vi.fn(),
+        contexts: vi.fn(() => [context]),
         newContext: vi.fn(() => Promise.resolve(context)),
     };
 };
@@ -58,6 +63,7 @@ vi.mock('playwright', () => ({
         connect,
         connectOverCDP,
         launch,
+        launchPersistentContext,
     },
 }));
 
@@ -83,6 +89,7 @@ const resetMocks = () => {
     connect.mockReset();
     connectOverCDP.mockReset();
     launch.mockReset();
+    launchPersistentContext.mockReset();
     routeContinue.mockReset();
     routeAbort.mockReset();
     route.request.mockReset();
@@ -91,8 +98,10 @@ const resetMocks = () => {
     proxyMock.multiProxy = undefined;
     proxyMock.getCurrentProxy.mockReset();
     proxyMock.markProxyFailed.mockReset();
-    delete process.env.PLAYWRIGHT_WS_ENDPOINT;
-    delete process.env.PUPPETEER_WS_ENDPOINT;
+    process.env.PLAYWRIGHT_WS_ENDPOINT = '';
+    process.env.PUPPETEER_WS_ENDPOINT = '';
+    process.env.PLAYWRIGHT_CDP_ENDPOINT = '';
+    process.env.PLAYWRIGHT_USER_DATA_DIR = '';
 };
 
 createBrowserMocks();
@@ -126,6 +135,55 @@ describe('getPlaywrightPage (mocked)', () => {
 
         await result.destroy();
         expect(close).toHaveBeenCalled();
+    });
+
+    it('uses an existing CDP default context without closing it', async () => {
+        resetMocks();
+        connectOverCDP.mockResolvedValue(browser);
+        page.goto.mockResolvedValue(undefined);
+        proxyMock.getCurrentProxy.mockReturnValue(null);
+        process.env.PLAYWRIGHT_CDP_ENDPOINT = 'http://127.0.0.1:9222';
+
+        const getPlaywrightPage = await loadPlaywright();
+        const close = browser.close;
+        const result = await getPlaywrightPage('https://example.com', {
+            noGoto: true,
+        });
+
+        expect(connectOverCDP).toHaveBeenCalledWith('http://127.0.0.1:9222');
+        expect(browser.newContext).not.toHaveBeenCalled();
+        expect(context.newPage).toHaveBeenCalled();
+
+        await result.destroy();
+        expect(page.close).toHaveBeenCalled();
+        expect(context.close).not.toHaveBeenCalled();
+        expect(close).toHaveBeenCalled();
+    });
+
+    it('launches a persistent context from a configured user data dir', async () => {
+        resetMocks();
+        launchPersistentContext.mockResolvedValue(context);
+        page.goto.mockResolvedValue(undefined);
+        proxyMock.getCurrentProxy.mockReturnValue(null);
+        process.env.PLAYWRIGHT_USER_DATA_DIR = '/tmp/rsshub-profile';
+
+        const getPlaywrightPage = await loadPlaywright();
+        const close = browser.close;
+        const result = await getPlaywrightPage('https://example.com', {
+            noGoto: true,
+        });
+
+        expect(launchPersistentContext).toHaveBeenCalledWith(
+            '/tmp/rsshub-profile',
+            expect.objectContaining({
+                ignoreHTTPSErrors: true,
+            })
+        );
+        expect(launch).not.toHaveBeenCalled();
+
+        await result.destroy();
+        expect(context.close).toHaveBeenCalled();
+        expect(close).not.toHaveBeenCalled();
     });
 
     it('does not override the browser user agent', async () => {

@@ -10,6 +10,8 @@ type ConfigEnvKeys =
     | 'NODE_NAME'
     | 'PLAYWRIGHT_WS_ENDPOINT'
     | 'PUPPETEER_WS_ENDPOINT'
+    | 'PLAYWRIGHT_CDP_ENDPOINT'
+    | 'PLAYWRIGHT_USER_DATA_DIR'
     | 'CHROMIUM_EXECUTABLE_PATH'
     // Network
     | 'PORT'
@@ -262,6 +264,8 @@ export type Config = {
     isPackage: boolean;
     nodeName?: string;
     playwrightWSEndpoint?: string;
+    playwrightCDPEndpoint?: string;
+    playwrightUserDataDir?: string;
     chromiumExecutablePath?: string;
     // network
     connect: {
@@ -762,6 +766,8 @@ const calculateValue = () => {
         isPackage: !!envs.IS_PACKAGE,
         nodeName: envs.NODE_NAME,
         playwrightWSEndpoint: envs.PLAYWRIGHT_WS_ENDPOINT ?? envs.PUPPETEER_WS_ENDPOINT,
+        playwrightCDPEndpoint: envs.PLAYWRIGHT_CDP_ENDPOINT,
+        playwrightUserDataDir: envs.PLAYWRIGHT_USER_DATA_DIR,
         chromiumExecutablePath: envs.CHROMIUM_EXECUTABLE_PATH,
         // network
         connect: {
