@@ -1,13 +1,13 @@
 import { load } from 'cheerio';
 import pMap from 'p-map';
+import type { BrowserContext } from 'patchright';
 
 import { config } from '@/config';
 import ConfigNotFoundError from '@/errors/types/config-not-found';
 import cache from '@/utils/cache';
 import logger from '@/utils/logger';
 import { parseDate } from '@/utils/parse-date';
-import type { Page } from '@/utils/puppeteer';
-import { getPuppeteerPage } from '@/utils/puppeteer';
+import { getPlaywrightPage, type Page } from '@/utils/playwright';
 
 const allowDomain = new Set(['avbase.net', 'www.avbase.net']);
 const avbaseBrowserCloseTimeout = 90000;
@@ -59,45 +59,42 @@ const parseAvbaseCookies = (cookie: string, hostname: string) =>
         })
         .filter((item) => item !== undefined);
 
-const applyAvbaseCookies = async (page: Page, hostname: string) => {
+const applyAvbaseCookies = async (context: BrowserContext, hostname: string) => {
     if (!config.avbase?.cookies) {
         return;
     }
 
     const cookies = parseAvbaseCookies(config.avbase.cookies, hostname);
     if (cookies.length > 0) {
-        await page.setCookie(...cookies);
+        await context.addCookies(cookies);
     }
 };
 
 const withAvbaseBrowserGate = async <T>(task: () => Promise<T>) => {
     const previousTask = avbaseBrowserQueue;
-    let releaseQueue: () => void;
-    avbaseBrowserQueue = new Promise<void>((resolve) => {
-        releaseQueue = resolve;
-    });
+    const { promise: nextTask, resolve: releaseQueue } = Promise.withResolvers<void>();
+    avbaseBrowserQueue = nextTask;
 
     await previousTask;
 
     try {
         return await task();
     } finally {
-        releaseQueue!();
+        releaseQueue();
     }
 };
 
 const setupPage = async (page: Page, hostname: string) => {
     page.setDefaultNavigationTimeout(avbaseBrowserNavigationTimeout);
     page.setDefaultTimeout(avbaseBrowserNavigationTimeout);
-    await page.setRequestInterception(true);
-    page.on('request', (request: any) => {
-        avbaseAllowedResourceTypes.has(request.resourceType()) ? request.continue() : request.abort();
+    await page.route('**/*', (route) => {
+        avbaseAllowedResourceTypes.has(route.request().resourceType()) ? route.continue() : route.abort();
     });
 
-    await applyAvbaseCookies(page, hostname);
+    await applyAvbaseCookies(page.context(), hostname);
 };
 
-const isRetryableAvbaseError = (error: unknown) =>
+const isRetryableAvbaseError = (error: unknown): error is Error =>
     error instanceof Error &&
     (error.message.includes('Execution context was destroyed') ||
         error.message.includes('Target page, context or browser has been closed') ||
@@ -108,17 +105,15 @@ const isRetryableAvbaseError = (error: unknown) =>
 const runAvbasePageSession = async <T>(url: string, hostname: string, runner: (page: Page) => Promise<T>, noGoto = false) => {
     let session: AvbasePageSession | undefined;
     try {
-        session = (await getPuppeteerPage(url, {
+        session = await getPlaywrightPage(url, {
             closeTimeout: avbaseBrowserCloseTimeout,
             gotoConfig: {
                 timeout: avbaseBrowserNavigationTimeout,
                 waitUntil: 'domcontentloaded',
             },
             noGoto,
-            onBeforeLoad: async (page) => {
-                await setupPage(page, hostname);
-            },
-        })) as unknown as AvbasePageSession;
+            onBeforeLoad: (page) => setupPage(page, hostname),
+        });
         logger.http(`Requesting ${url}`);
         return await runner(session.page);
     } finally {
@@ -225,7 +220,7 @@ const extractItemsFromWorkLinks = ($, rootUrl, limit): AvbaseListItem[] => {
         });
     });
 
-    return [...workItems.values()];
+    return workItems.values().toArray();
 };
 
 const buildFallbackItem = (item: AvbaseListItem): AvbaseDetailResult => ({
@@ -233,13 +228,11 @@ const buildFallbackItem = (item: AvbaseListItem): AvbaseDetailResult => ({
     link: item.link,
     pubDate: item.pubDate,
     author: item.actors.join(', '),
-    ...(item.cover
-        ? {
-              enclosure_url: item.cover,
-              enclosure_type: 'image/jpeg',
-              description: `<div><strong>封面:</strong><br><img src="${item.cover}" style="max-width:300px;"></div>`,
-          }
-        : {}),
+    ...(item.cover && {
+        enclosure_url: item.cover,
+        enclosure_type: 'image/jpeg',
+        description: `<div><strong>封面:</strong><br><img src="${item.cover}" style="max-width:300px;"></div>`,
+    }),
 });
 
 const fetchDetailItem = async (page: Page, item: AvbaseListItem): Promise<AvbaseDetailResult> => {
@@ -345,7 +338,7 @@ const ProcessItems = async (ctx, currentUrl, title) => {
     const detailMap = items.length > 0 ? await fetchDetails(items, url.hostname) : new Map<string, AvbaseDetailResult | null>();
     const processedItems = items.map((item) => detailMap.get(item.link) ?? buildFallbackItem(item));
 
-    const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
+    const subject = htmlTitle.includes('|') ? htmlTitle.split('|', 1)[0] : '';
     return {
         title: subject === '' ? title : `${subject} - ${title}`,
         link: url.href,

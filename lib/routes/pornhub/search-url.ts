@@ -1,7 +1,7 @@
 import { load } from 'cheerio';
 
 import InvalidParameterError from '@/errors/types/invalid-parameter';
-import type { Route } from '@/types';
+import type { Language, Route } from '@/types';
 import got from '@/utils/got';
 import { isValidHost } from '@/utils/valid-host';
 
@@ -53,7 +53,7 @@ async function handler(ctx) {
     return {
         title: `Pornhub Search - ${keyword}`,
         link,
-        language: $('html').attr('lang'),
+        language: $('html').attr('lang') as Language,
         item: items,
     };
 }
