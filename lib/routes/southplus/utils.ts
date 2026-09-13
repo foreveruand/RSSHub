@@ -1,11 +1,19 @@
 import { load } from 'cheerio';
 import rssParser from 'rss-parser';
 
+import type { DataItem } from '@/types';
 import cache from '@/utils/cache';
 import got from '@/utils/got';
 import { parseDate } from '@/utils/parse-date';
 
 const RSS_URL = 'https://www.south-plus.net/rss.php';
+
+type SouthPlusItem = Omit<DataItem, 'link' | 'pubDate'> & {
+    link: string;
+    pubDate?: string;
+    _raw?: string;
+    _cover?: string;
+};
 
 function extractImages(desc: string): string[] {
     const regex = /\[img\](.*?)\[\/img\]/gi;
@@ -35,7 +43,7 @@ function formatReleaseDate(date?: string | Date): string | undefined {
         return undefined;
     }
 
-    return parsedDate.toISOString().split('T')[0];
+    return parsedDate.toISOString().split('T', 1)[0];
 }
 
 async function fetchCoverFromPage(url: string): Promise<string> {
@@ -69,13 +77,14 @@ export const ProcessItems = async (ctx, category?: string, title?: string) => {
     const limit = ctx.req.query('limit') ? Number(ctx.req.query('limit')) : 20;
     items = items.slice(0, limit);
 
-    let result = items.map((item) => {
-        const link = item.link?.startsWith('http') ? item.link : 'https:' + item.link;
+    let result: SouthPlusItem[] = items.map((item): SouthPlusItem => {
+        const articleUrl = new URL(item.link ?? '', RSS_URL);
+        articleUrl.hostname = 'www.south-plus.net';
+        const link = articleUrl.href;
         const raw = item.content ?? item.contentSnippet ?? item.description ?? '';
         const images = extractImages(raw);
 
         const cover = images[0] || '';
-        const screenshots = images.slice(1);
 
         return {
             title: item.title ?? '',
@@ -85,7 +94,6 @@ export const ProcessItems = async (ctx, category?: string, title?: string) => {
             category: item.categories ?? item.category,
             _raw: raw, // 后面 detail 用
             _cover: cover,
-            _screenshots: screenshots,
         };
     });
 
@@ -100,8 +108,7 @@ export const ProcessItems = async (ctx, category?: string, title?: string) => {
                     coverImg = await fetchCoverFromPage(item.link);
                 }
 
-                const screenshots = item._screenshots;
-                const tags = item.category ? [item.category] : [];
+                const tags = item.category === undefined ? [] : Array.isArray(item.category) ? item.category : [item.category];
                 const releaseDate = formatReleaseDate(item.pubDate);
                 const contentText = cleanContent(item._raw || '');
 
@@ -113,16 +120,12 @@ export const ProcessItems = async (ctx, category?: string, title?: string) => {
                     '<hr>' +
                     `<pre>${contentText || '无内容'}</pre>`;
 
-                item.releaseDate = releaseDate;
-                item.actors = [];
-                item.cover = coverImg;
-                item.screenshots = screenshots;
-                item.tags = tags;
+                item.image = coverImg || undefined;
+                item.category = tags;
                 item.description = descriptionHtml;
 
                 delete item._raw;
                 delete item._cover;
-                delete item._screenshots;
 
                 return item;
             })
