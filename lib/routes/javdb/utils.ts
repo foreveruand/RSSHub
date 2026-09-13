@@ -5,7 +5,7 @@ import ConfigNotFoundError from '@/errors/types/config-not-found';
 import cache from '@/utils/cache';
 import logger from '@/utils/logger';
 import { parseDate } from '@/utils/parse-date';
-import puppeteer from '@/utils/puppeteer';
+import playwright from '@/utils/playwright';
 
 const allowDomain = new Set(['javdb.com', 'javdb571.com', 'javdb36.com', 'javdb007.com', 'javdb521.com']);
 
@@ -26,12 +26,11 @@ const parseCachedItem = <T>(value: string | T | null | undefined): T | null => {
 };
 
 const setupPage = async (page) => {
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-            req.abort();
+    await page.route('**/*', (route) => {
+        if (['image', 'stylesheet', 'font', 'media'].includes(route.request().resourceType())) {
+            route.abort();
         } else {
-            req.continue();
+            route.continue();
         }
     });
 };
@@ -45,19 +44,21 @@ const ProcessItems = async (ctx, currentUrl, title) => {
     }
 
     const rootUrl = `https://${domain}`;
-    const browser = await puppeteer();
+    const context = await playwright();
 
     try {
-        const listPage = await browser.newPage();
+        const listPage = await context.newPage();
         await setupPage(listPage);
 
         if (config.javdb.session) {
-            await listPage.setCookie({
-                name: '_jdb_session',
-                value: config.javdb.session,
-                domain: url.hostname,
-                path: '/',
-            });
+            await context.addCookies([
+                {
+                    name: '_jdb_session',
+                    value: config.javdb.session,
+                    domain: url.hostname,
+                    path: '/',
+                },
+            ]);
         }
 
         await listPage.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -71,14 +72,19 @@ const ProcessItems = async (ctx, currentUrl, title) => {
         const rawItems = $('div.item')
             .slice(0, ctx.req.query('limit') ? Number.parseInt(ctx.req.query('limit')) : 20)
             .toArray()
-            .map((item) => {
+            .flatMap((item) => {
                 const $item = $(item);
+                const href = $item.find('.box').attr('href');
+                if (!href) {
+                    return [];
+                }
+
                 return {
                     title: $item.find('.video-title').text(),
-                    link: new URL($item.find('.box').attr('href'), rootUrl).href,
+                    link: new URL(href, rootUrl).href,
                     pubDate: parseDate($item.find('.meta').text()),
                 };
-        });
+            });
 
         const needsDetail: typeof rawItems = [];
         const cachedResults = await Promise.all(
@@ -100,7 +106,7 @@ const ProcessItems = async (ctx, currentUrl, title) => {
         const detailMap = new Map();
 
         if (needsDetail.length > 0) {
-            const detailPage = await browser.newPage();
+            const detailPage = await context.newPage();
             await setupPage(detailPage);
 
             for (const item of needsDetail) {
@@ -138,7 +144,7 @@ const ProcessItems = async (ctx, currentUrl, title) => {
 
                     detailMap.set(item.link, result);
                 } catch (error) {
-                    if (error.name !== 'TimeoutError') {
+                    if (!(error instanceof Error) || error.name !== 'TimeoutError') {
                         throw error;
                     }
                     logger.warn(`Timeout for ${item.link}, falling back to list data`);
@@ -150,7 +156,7 @@ const ProcessItems = async (ctx, currentUrl, title) => {
         }
 
         const processedItems = rawItems.map((item, index) => cachedResults[index] ?? detailMap.get(item.link) ?? item);
-        const subject = htmlTitle.includes('|') ? htmlTitle.split('|')[0] : '';
+        const subject = htmlTitle.includes('|') ? htmlTitle.split('|', 1)[0] : '';
 
         return {
             title: subject === '' ? title : `${subject} - ${title}`,
@@ -158,7 +164,7 @@ const ProcessItems = async (ctx, currentUrl, title) => {
             item: processedItems,
         };
     } finally {
-        await browser.close();
+        await context.close();
     }
 };
 
