@@ -107,10 +107,13 @@ jobs:
 
                   # Pull latest code
                   cd "${DEPLOY_PATH}"
-                  npm i --legacy-peer-deps
                   git fetch origin "${DEPLOY_BRANCH}"
                   git checkout "${DEPLOY_BRANCH}"
                   git reset --hard origin/"${DEPLOY_BRANCH}"
+
+                  # Install dependencies for the pulled revision, so newly added
+                  # packages required by dist are present before the service restarts
+                  npm i --legacy-peer-deps
 
                   # Update uploaded build outputs
                   rm -rf assets/build
